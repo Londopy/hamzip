@@ -61,7 +61,8 @@ def quantize_rows(w):
     over = m >= 1 << 24
     m[over] >>= 1
     e[over] -= 1
-    if (e < 0).any() or (e > 255).any():
+    # the engine refuses shifts above 47 so its products can't overflow
+    if (e < 0).any() or (e > 47).any():
         sys.exit("row scale shift out of range")
     m[zero] = 0
     e[zero] = 0
