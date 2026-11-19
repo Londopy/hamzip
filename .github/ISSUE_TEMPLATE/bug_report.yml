@@ -1,0 +1,58 @@
+name: Bug report
+description: hamzip crashed, a message didn't decode, or something else went wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If a message didn't decode, attach the message file and, if you have it, the text that was sent.
+        Say which platform each station runs: the sending and the receiving side both matter.
+  - type: input
+    id: version
+    attributes:
+      label: hamzip version
+      description: Output of `hamzip --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows x64
+        - Windows x86
+        - Windows on ARM
+        - Linux x86_64
+        - Linux aarch64 (64-bit Raspberry Pi OS)
+        - Linux armv7 (32-bit Raspberry Pi OS)
+        - Built from source on something else
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - setup.exe
+        - MSI
+        - Portable exe or zip
+        - install.ps1
+        - Linux binary from a release
+        - Built from source
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The command you ran and what it printed.
+      render: text
+  - type: textarea
+    id: ai
+    attributes:
+      label: AI tools
+      description: If an AI tool wrote or summarized this report, say which.

@@ -1,0 +1,20 @@
+name: Feature request
+description: A new command, option, platform or transport to support
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: What are you sending, over which mode or program, and what can't you do today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like hamzip to do?
+  - type: textarea
+    id: ai
+    attributes:
+      label: AI tools
+      description: If an AI tool wrote or summarized this request, say which.

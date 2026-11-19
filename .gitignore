@@ -2,3 +2,25 @@
 /models
 .venv/
 __pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Build output
+*.exe
+*.pdb
+*.msi
+*.wixpdb
+installer/output/
+installer/license.rtf
+
+# Secrets
+.env
+*.key
