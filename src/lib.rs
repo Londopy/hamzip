@@ -8,6 +8,8 @@ mod tokenizer;
 use std::fmt;
 use std::io::Read;
 
+use rayon::prelude::*;
+
 pub use model::Model;
 pub use tokenizer::Tokenizer;
 
@@ -80,14 +82,31 @@ fn frame(mode: Mode, body: &[u8], text: &[u8]) -> Vec<u8> {
 
 /// Codes token ids with the model; the sequence ends with the end-of-text token.
 pub fn encode_tokens(m: &Model, tokens: &[u32]) -> Vec<u8> {
+    encode_in_blocks(m, tokens, 64)
+}
+
+// the encoder knows every token up front, so it runs the model on blocks of them
+fn encode_in_blocks(m: &Model, tokens: &[u32], block: usize) -> Vec<u8> {
+    let inputs: Vec<u32> = std::iter::once(m.cfg.eos)
+        .chain(tokens.iter().copied())
+        .collect();
+    let targets: Vec<u32> = tokens
+        .iter()
+        .copied()
+        .chain(std::iter::once(m.cfg.eos))
+        .collect();
     let mut s = engine::Session::new(m);
     let mut enc = rangecoder::Encoder::new();
-    let mut prev = m.cfg.eos;
-    for &t in tokens.iter().chain([m.cfg.eos].iter()) {
-        let cum = engine::cumulative(m, &s.step(prev));
-        let (lo, hi) = (cum[t as usize], cum[t as usize + 1]);
-        enc.encode(lo, hi - lo, *cum.last().unwrap());
-        prev = t;
+    for (ins, outs) in inputs.chunks(block).zip(targets.chunks(block)) {
+        let cums: Vec<Vec<u32>> = s
+            .steps(ins)
+            .par_iter()
+            .map(|l| engine::cumulative(m, l))
+            .collect();
+        for (cum, &t) in cums.iter().zip(outs) {
+            let (lo, hi) = (cum[t as usize], cum[t as usize + 1]);
+            enc.encode(lo, hi - lo, *cum.last().unwrap());
+        }
     }
     enc.finish()
 }
@@ -280,6 +299,17 @@ mod tests {
         let msg = compress(None, None, &text);
         assert_eq!(mode_of(&msg).unwrap(), Mode::Raw);
         assert_eq!(decompress(None, &msg).unwrap(), text);
+    }
+
+    #[test]
+    fn block_size_does_not_change_the_bytes() {
+        let m = test_model();
+        let tokens = Tokenizer::new(m)
+            .encode(std::str::from_utf8(NET).unwrap())
+            .unwrap();
+        let one = encode_in_blocks(m, &tokens, 1);
+        assert_eq!(encode_in_blocks(m, &tokens, 7), one);
+        assert_eq!(encode_in_blocks(m, &tokens, 64), one);
     }
 
     #[test]

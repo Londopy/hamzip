@@ -93,16 +93,23 @@ unsafe fn dot_avx2(a: &[i16], q: &[i8]) -> i64 {
     total
 }
 
-fn linear(x: &QVec, w: &Linear) -> Vec<i32> {
-    let mut out = vec![0i32; w.rows];
-    out.par_iter_mut()
+/// Multiplies every vector in `xs` by `w`; each weight row is read once for the whole batch.
+fn linear(xs: &[QVec], w: &Linear) -> Vec<Vec<i32>> {
+    let n = xs.len();
+    let mut out = vec![0i32; w.rows * n];
+    out.par_chunks_mut(n)
         .enumerate()
-        .with_min_len(64)
+        .with_min_len((64 / n).max(1))
         .for_each(|(r, o)| {
-            let acc = dot(&x.a, &w.q[r * w.cols..(r + 1) * w.cols]);
-            *o = sat32(round_shift(acc * w.mant[r], w.shift[r] + x.frac - ACT_FRAC));
+            let row = &w.q[r * w.cols..(r + 1) * w.cols];
+            for (o, x) in o.iter_mut().zip(xs) {
+                let acc = dot(&x.a, row);
+                *o = sat32(round_shift(acc * w.mant[r], w.shift[r] + x.frac - ACT_FRAC));
+            }
         });
-    out
+    (0..n)
+        .map(|j| (0..w.rows).map(|r| out[r * n + j]).collect())
+        .collect()
 }
 
 fn rmsnorm(x: &[i32], gain: &[i32]) -> QVec {
@@ -168,30 +175,42 @@ impl<'m> Session<'m> {
 
     /// Runs one token through the model and returns Q12 logits for the next one.
     pub fn step(&mut self, token: u32) -> Vec<i32> {
+        self.steps(&[token]).pop().unwrap()
+    }
+
+    /// Runs consecutive tokens at once; result `i` is what `step` would return for
+    /// `tokens[i]`. Every token's arithmetic is independent of the batch, so the
+    /// logits are identical, but weights are read once per batch instead of per token.
+    pub fn steps(&mut self, tokens: &[u32]) -> Vec<Vec<i32>> {
         let m = self.m;
-        assert!(self.pos < m.cfg.max_ctx, "context full");
+        assert!(self.pos + tokens.len() <= m.cfg.max_ctx, "context full");
         let e = &m.embed;
-        let t = token as usize;
-        let row = &e.q[t * e.cols..(t + 1) * e.cols];
-        let mut x: Vec<i32> = row
+        let mut xs: Vec<Vec<i32>> = tokens
             .iter()
-            .map(|&q| sat32(round_shift(q as i64 * e.mant[t], e.shift[t] - ACT_FRAC)))
+            .map(|&t| {
+                let t = t as usize;
+                e.q[t * e.cols..(t + 1) * e.cols]
+                    .iter()
+                    .map(|&q| sat32(round_shift(q as i64 * e.mant[t], e.shift[t] - ACT_FRAC)))
+                    .collect()
+            })
             .collect();
 
         for l in 0..m.cfg.n_layers {
-            let a = self.attention(l, &x);
-            add(&mut x, &a);
-            let f = self.mlp(l, &x);
-            add(&mut x, &f);
+            let a = self.attention(l, &xs);
+            xs.iter_mut().zip(&a).for_each(|(x, a)| add(x, a));
+            let f = self.mlp(l, &xs);
+            xs.iter_mut().zip(&f).for_each(|(x, f)| add(x, f));
         }
-        self.pos += 1;
-        linear(&rmsnorm(&x, &m.final_norm), &m.embed)
+        self.pos += tokens.len();
+        let hs: Vec<QVec> = xs.iter().map(|x| rmsnorm(x, &m.final_norm)).collect();
+        linear(&hs, &m.embed)
     }
 
-    fn rope(&self, v: &mut [i32]) {
+    fn rope(&self, v: &mut [i32], pos: usize) {
         let half = self.m.cfg.head_dim / 2;
-        let cos = &self.m.rope_cos[self.pos * half..(self.pos + 1) * half];
-        let sin = &self.m.rope_sin[self.pos * half..(self.pos + 1) * half];
+        let cos = &self.m.rope_cos[pos * half..(pos + 1) * half];
+        let sin = &self.m.rope_sin[pos * half..(pos + 1) * half];
         for head in v.chunks_mut(self.m.cfg.head_dim) {
             for j in 0..half {
                 let (a, b) = (head[j] as i64, head[j + half] as i64);
@@ -202,26 +221,32 @@ impl<'m> Session<'m> {
         }
     }
 
-    fn attention(&mut self, l: usize, x: &[i32]) -> Vec<i32> {
+    fn attention(&mut self, l: usize, xs: &[Vec<i32>]) -> Vec<Vec<i32>> {
         let m = self.m;
-        let (hd, kvd) = (m.cfg.head_dim, m.cfg.n_kv_heads * m.cfg.head_dim);
+        let (d, hd, kvd) = (
+            m.cfg.d_model,
+            m.cfg.head_dim,
+            m.cfg.n_kv_heads * m.cfg.head_dim,
+        );
         let layer = &m.layers[l];
-        let h = rmsnorm(x, &layer.attn_norm);
-        let mut qkv = linear(&h, &layer.qkv);
-        let d = m.cfg.d_model;
-        self.rope(&mut qkv[..d + kvd]);
-        let (q, kv) = qkv.split_at(d);
-        self.keys[l].extend_from_slice(&kv[..kvd]);
-        self.values[l].extend_from_slice(&kv[kvd..]);
+        let hs: Vec<QVec> = xs.iter().map(|x| rmsnorm(x, &layer.attn_norm)).collect();
+        let mut qkvs = linear(&hs, &layer.qkv);
+        for (i, qkv) in qkvs.iter_mut().enumerate() {
+            self.rope(&mut qkv[..d + kvd], self.pos + i);
+            self.keys[l].extend_from_slice(&qkv[d..d + kvd]);
+            self.values[l].extend_from_slice(&qkv[d + kvd..]);
+        }
 
         let (keys, values) = (&self.keys[l], &self.values[l]);
-        let n = self.pos + 1;
-        let group = m.cfg.n_heads / m.cfg.n_kv_heads;
-        // softmax(q.k / sqrt(64)) . v per head, result in Q28
-        let heads: Vec<Vec<i64>> = (0..m.cfg.n_heads)
+        let (heads, group) = (m.cfg.n_heads, m.cfg.n_heads / m.cfg.n_kv_heads);
+        // softmax(q.k / sqrt(64)) . v per token and head, result in Q28; token i sees
+        // only the positions up to its own
+        let outs: Vec<Vec<i64>> = (0..xs.len() * heads)
             .into_par_iter()
-            .map(|hi| {
-                let qh = &q[hi * hd..(hi + 1) * hd];
+            .map(|job| {
+                let (i, hi) = (job / heads, job % heads);
+                let n = self.pos + i + 1;
+                let qh = &qkvs[i][hi * hd..(hi + 1) * hd];
                 let off = (hi / group) * hd;
                 let scores: Vec<i64> = (0..n)
                     .map(|j| {
@@ -251,20 +276,29 @@ impl<'m> Session<'m> {
                     .collect()
             })
             .collect();
-        linear(&quantize(&heads.concat(), 28), &layer.o)
+        let qs: Vec<QVec> = outs
+            .chunks(heads)
+            .map(|h| quantize(&h.concat(), 28))
+            .collect();
+        linear(&qs, &layer.o)
     }
 
-    fn mlp(&self, l: usize, x: &[i32]) -> Vec<i32> {
+    fn mlp(&self, l: usize, xs: &[Vec<i32>]) -> Vec<Vec<i32>> {
         let layer = &self.m.layers[l];
-        let h = rmsnorm(x, &layer.mlp_norm);
-        let gu = linear(&h, &layer.gate_up);
-        let (g, u) = gu.split_at(self.m.cfg.d_ff);
-        let act: Vec<i64> = g
+        let hs: Vec<QVec> = xs.iter().map(|x| rmsnorm(x, &layer.mlp_norm)).collect();
+        let acts: Vec<QVec> = linear(&hs, &layer.gate_up)
             .iter()
-            .zip(u)
-            .map(|(&g, &u)| silu(self.m, g) * u as i64)
+            .map(|gu| {
+                let (g, u) = gu.split_at(self.m.cfg.d_ff);
+                let act: Vec<i64> = g
+                    .iter()
+                    .zip(u)
+                    .map(|(&g, &u)| silu(self.m, g) * u as i64)
+                    .collect();
+                quantize(&act, 2 * ACT_FRAC)
+            })
             .collect();
-        linear(&quantize(&act, 2 * ACT_FRAC), &layer.down)
+        linear(&acts, &layer.down)
     }
 }
 
@@ -326,17 +360,29 @@ mod tests {
         let inputs = [
             0u32, 26524, 216, 36, 32, 2199, 411, 216, 33, 38, 32, 32, 60, 28, 273, 313,
         ];
-        let mut s = Session::new(m);
-        let mut h = Sha256::new();
-        for &t in &inputs {
-            for c in cumulative(m, &s.step(t)) {
-                h.update(c.to_le_bytes());
+        let hash = |logits: Vec<Vec<i32>>| {
+            let mut h = Sha256::new();
+            for l in logits {
+                for c in cumulative(m, &l) {
+                    h.update(c.to_le_bytes());
+                }
             }
-        }
-        let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+            h.finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        let want = "06bb91abb7fe03b1816370286e2b83a7dd33804264ad730617deb000df90584e";
+
+        let mut s = Session::new(m);
         assert_eq!(
-            hex,
-            "06bb91abb7fe03b1816370286e2b83a7dd33804264ad730617deb000df90584e"
+            hash(inputs.iter().map(|&t| s.step(t)).collect()),
+            want,
+            "one at a time"
         );
+        let mut s = Session::new(m);
+        let mut batched = s.steps(&inputs[..5]);
+        batched.extend(s.steps(&inputs[5..]));
+        assert_eq!(hash(batched), want, "in batches of 5 and 11");
     }
 }
