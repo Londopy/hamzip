@@ -5,6 +5,9 @@ import hashlib
 import json
 import math
 import statistics
+import subprocess
+import sys
+import tempfile
 import time
 import zlib
 from pathlib import Path
@@ -121,10 +124,31 @@ def row(label, bits, test, header_bytes):
     )
 
 
+def hamzip_run(exe, model, test):
+    """Round-trip the test split through the real codec; returns payload bits and its report."""
+    with tempfile.TemporaryDirectory() as d:
+        for m in test:
+            (Path(d) / f"{m['id']}.txt").write_bytes(m["text"].encode())
+        r = subprocess.run([exe, "-m", model, "bench", d], capture_output=True, text=True, timeout=7200)
+    if r.returncode != 0:
+        sys.exit(f"hamzip bench failed: {r.stderr.strip()}")
+    rows = {}
+    for line in r.stdout.splitlines()[1:]:
+        f = line.split("\t")
+        if len(f) == 7:
+            rows[f[0].removesuffix(".txt")] = {"tokens": int(f[2]), "bytes": int(f[3]), "mode": f[4]}
+    # model mode frames are 1 header byte, 2 model id bytes and a 4 byte crc; the others skip the id
+    bits = [(rows[m["id"]]["bytes"] - (7 if rows[m["id"]]["mode"] == "Model" else 5)) * 8 for m in test]
+    summary = [line for line in r.stdout.splitlines() if line and "\t" not in line]
+    return bits, rows, summary
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--models", nargs="+", default=["SmolLM2-135M", "SmolLM2-360M"])
-    ap.add_argument("--header", type=int, default=6, help="bytes of hamzip framing to charge per message")
+    ap.add_argument("--models", nargs="*", default=["SmolLM2-135M", "SmolLM2-360M"])
+    ap.add_argument("--header", type=int, default=7, help="bytes of hamzip framing to charge per message")
+    ap.add_argument("--hamzip", help="path to the hamzip binary, to measure the real codec too")
+    ap.add_argument("--hamzip-model", default=str(ROOT / "models" / "smollm2-135m.hzm"))
     args = ap.parse_args()
 
     msgs = load_corpus()
@@ -145,8 +169,17 @@ def main():
             print(row(f"{name}, preamble {pname}", exact, test, args.header))
             print(row(f"{name}, preamble {pname}, 24-bit freqs", quant, test, args.header))
             speeds.append(f"{name} preamble {pname}: {ntok} tokens, {rate:.0f} tok/s")
-    print("\nfloat32 cpu, whole message per forward pass:")
-    print("\n".join(speeds))
+    if args.hamzip:
+        bits, rows, summary = hamzip_run(args.hamzip, args.hamzip_model, test)
+        print(row("hamzip (integer engine, actual bytes)", bits, test, args.header))
+        tok = AutoTokenizer.from_pretrained(ROOT / "models" / "SmolLM2-135M")
+        differ = [m["id"] for m in test if len(tok.encode(m["text"])) != rows[m["id"]]["tokens"]]
+        modes = sorted({r["mode"] for r in rows.values()})
+        print(f"\nhamzip: {' '.join(summary)}")
+        print(f"modes used: {modes}; token count differs from Hugging Face on {len(differ)} messages {differ[:5]}")
+    if speeds:
+        print("\nfloat32 cpu, whole message per forward pass:")
+        print("\n".join(speeds))
 
 
 if __name__ == "__main__":
