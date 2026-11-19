@@ -1,0 +1,11 @@
+EXERCISE EXERCISE EXERCISE
+TO: Boulder OEM, Operations
+FROM: ARES Net Control, KE0VBT
+SUBJECT: Repeater and digital station status
+DATE: 2026-10-04
+TIME: 0920
+MESSAGE:
+All four county repeaters on the air. Lee Hill repeater on battery, commercial power out since 0815. Winlink stations active at Boulder Community Health, Longmont United, and Nederland fire station. Lafayette station not yet checked in.
+APPROVED BY: Tom Nakamura
+POSITION/TITLE: ARES Emergency Coordinator
+EXERCISE EXERCISE EXERCISE

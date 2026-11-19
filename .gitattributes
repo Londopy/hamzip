@@ -18,3 +18,7 @@
 *.msi binary
 *.exe binary
 *.londopy binary
+*.hz binary
+*.hzm binary
+# golden texts must keep their exact bytes, CRLF included
+tests/golden/*.txt -text

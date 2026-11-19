@@ -1,0 +1,11 @@
+EXERCISE EXERCISE EXERCISE
+1. Incident Name: 2026 Simulated Emergency Test
+2. To: Douglas County OR EOC
+3. From: Roseburg VA Medical Center radio room, KJ7PNE
+4. Subject: Hourly status
+5. Date: 2026-10-03
+6. Time: 1000
+7. Message:
+Simulated scenario: Cascadia M9.0. Facility on generator. 214 inpatients. 4 staff injured, minor. Water main break in parking lot B. Requesting 2 portable water tanks and 1 HF-capable operator for overnight shift.
+8. Approved by: Elaine Porter, Emergency Manager
+EXERCISE EXERCISE EXERCISE

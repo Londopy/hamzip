@@ -1,0 +1,7 @@
+TO: Operations
+FROM: Air Ops
+SUBJECT: RE: Glen Haven evacuations
+DATE: 2026-05-17
+TIME: 1305
+MESSAGE: All 6 Glen Haven residents flown out by Guard UH-60, landed Estes Park fairgrounds 1250. Mobility patient transferred to EMS. Request complete.
+APPROVED BY: Maj. T. Lindgren

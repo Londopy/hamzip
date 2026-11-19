@@ -1,0 +1,1 @@
+literal <|endoftext|> in the middle

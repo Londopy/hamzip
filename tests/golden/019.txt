@@ -1,0 +1,8 @@
+STORM REPORT
+DATE 07/22/26 TIME 1745 EDT (2145Z)
+LAT/LON 41.07N 85.14W (EN71)
+CITY Fort Wayne, Allen Co IN
+TYPE TSTM WIND DMG
+MAG est 60 mph
+REMARKS large oak limb on house, 2 cars damaged, no injuries
+SPOTTER N9QBX

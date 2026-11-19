@@ -1,0 +1,3 @@
+Antenna update. The vertical wasn't cutting it on 80 so I tried a loop. 260 ft of 14 ga around the back yard, about 30 ft up on 3 trees, fed with 450 ohm ladder line to a 4:1 balun at the shack. Holy cow. Noise is way down and I'm hearing stations I never heard before. Worked VK on 40 long path this morning at 1210Z.
+
+WA5NRY
