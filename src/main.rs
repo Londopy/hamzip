@@ -1,10 +1,13 @@
+mod upgrade;
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use hamzip::{compress, decompress, mode_of, Error, Mode, Model, Tokenizer};
+use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
 #[command(
@@ -12,7 +15,8 @@ use hamzip::{compress, decompress, mode_of, Error, Mode, Model, Tokenizer};
     about = "Compress short text messages for slow radio links with a shared language model"
 )]
 struct Cli {
-    /// Model file both stations share
+    /// Model file both stations share. Default: smollm2-135m.hzm next to hamzip, then in
+    /// the data folder (`hamzip model download` puts it there)
     #[arg(short, long, env = "HAMZIP_MODEL", global = true)]
     model: Option<PathBuf>,
     #[command(subcommand)]
@@ -33,8 +37,74 @@ enum Cmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Round-trip every file in a directory and report size and speed
+    /// Round-trip every file in a directory and report size, speed and a digest of the output
     Bench { dir: PathBuf },
+    /// Get the shared model file
+    Model {
+        #[command(subcommand)]
+        cmd: ModelCmd,
+    },
+    /// Replace this hamzip with the latest release, after checking its SHA-256
+    Upgrade {
+        /// Only say whether a newer version exists
+        #[arg(long)]
+        check: bool,
+        /// Don't ask before replacing the executable
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelCmd {
+    /// Download smollm2-135m.hzm (137 MB) and check its SHA-256
+    Download {
+        /// Folder to save it in (default: the data folder)
+        #[arg(long)]
+        to: Option<PathBuf>,
+    },
+    /// Print the model file hamzip would use
+    Path,
+}
+
+fn exe_dir() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.to_path_buf())
+}
+
+/// Per-user data folder; a `portable` file next to the exe keeps everything beside it.
+fn data_dir() -> PathBuf {
+    if let Some(d) = exe_dir().filter(|d| d.join("portable").exists()) {
+        return d;
+    }
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
+    };
+    base.unwrap_or_else(|| PathBuf::from(".")).join("hamzip")
+}
+
+fn model_path(given: &Option<PathBuf>) -> Result<PathBuf, Error> {
+    if let Some(p) = given {
+        return Ok(p.clone());
+    }
+    exe_dir()
+        .into_iter()
+        .chain([data_dir()])
+        .map(|d| d.join(upgrade::MODEL_FILE))
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            Error::Io(
+                "no model found: run `hamzip model download`, pass --model, or set HAMZIP_MODEL"
+                    .into(),
+            )
+        })
+}
+
+fn load(given: &Option<PathBuf>) -> Result<Model, Error> {
+    Model::load(&model_path(given)?)
 }
 
 fn read_input(path: &Option<PathBuf>) -> Result<Vec<u8>, Error> {
@@ -59,13 +129,6 @@ fn write_output(path: &Option<PathBuf>, data: &[u8]) -> Result<(), Error> {
     }
 }
 
-fn load(model: &Option<PathBuf>) -> Result<Model, Error> {
-    let path = model
-        .as_ref()
-        .ok_or_else(|| Error::Io("no model: pass --model or set HAMZIP_MODEL".into()))?;
-    Model::load(path)
-}
-
 fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
     let tok = Tokenizer::new(m);
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -84,6 +147,8 @@ fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
     let (mut chars, mut bytes, mut tokens) = (0usize, 0usize, 0usize);
     let (mut enc_s, mut dec_s) = (0f64, 0f64);
     let mut per_msg = Vec::new();
+    // two machines that print the same digest for the same files encode identically
+    let mut digest = Sha256::new();
     println!("file\tchars\ttokens\tbytes\tmode\tenc_ms\tdec_ms");
     for f in &files {
         let text = std::fs::read(f).map_err(|e| Error::Io(format!("{}: {e}", f.display())))?;
@@ -103,15 +168,17 @@ fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
                 f.display()
             )));
         }
+        digest.update((msg.len() as u32).to_le_bytes());
+        digest.update(&msg);
         let mode = mode_of(&msg)?;
         if mode == Mode::Model {
             tokens += ntok + 1;
             enc_s += (t1 - t0).as_secs_f64();
             dec_s += (t2 - t1).as_secs_f64();
         }
-        chars += n;
+        chars += n.max(1);
         bytes += msg.len();
-        per_msg.push(msg.len() as f64 * 8.0 / n as f64);
+        per_msg.push(msg.len() as f64 * 8.0 / n.max(1) as f64);
         let name = f.file_name().unwrap().to_string_lossy();
         println!(
             "{name}\t{n}\t{ntok}\t{}\t{mode:?}\t{:.0}\t{:.0}",
@@ -134,10 +201,16 @@ fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
             tokens as f64 / dec_s
         );
     }
+    let hex: String = digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    println!("digest {hex}");
     Ok(())
 }
 
-fn run(cli: Cli) -> Result<(), Error> {
+fn run(cli: &Cli) -> Result<(), Error> {
     match &cli.cmd {
         Cmd::Encode { input, output } => {
             let m = load(&cli.model)?;
@@ -155,11 +228,36 @@ fn run(cli: Cli) -> Result<(), Error> {
             write_output(output, &decompress(m.as_ref(), &msg)?)
         }
         Cmd::Bench { dir } => bench(&load(&cli.model)?, dir),
+        Cmd::Model {
+            cmd: ModelCmd::Download { to },
+        } => {
+            let path = upgrade::download_model(&to.clone().unwrap_or_else(data_dir))?;
+            println!("saved {}", path.display());
+            Ok(())
+        }
+        Cmd::Model {
+            cmd: ModelCmd::Path,
+        } => {
+            println!("{}", model_path(&cli.model)?.display());
+            Ok(())
+        }
+        Cmd::Upgrade { check, yes } => upgrade::upgrade(*check, *yes),
     }
 }
 
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let cli = Cli::parse();
+    upgrade::clean_old_exe();
+    let notice = match cli.cmd {
+        Cmd::Upgrade { .. } => None,
+        _ => upgrade::start_notice(&data_dir()),
+    };
+    let result = run(&cli);
+    // the check runs alongside the command; don't hold the user up waiting for it
+    if let Some(msg) = notice.and_then(|rx| rx.recv_timeout(Duration::from_millis(300)).ok()) {
+        eprintln!("{msg}");
+    }
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("hamzip: {e}");
