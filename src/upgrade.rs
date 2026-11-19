@@ -33,8 +33,15 @@ struct Asset {
     browser_download_url: String,
 }
 
-fn net_err(e: impl std::fmt::Display) -> Error {
-    Error::Io(format!("network: {e}"))
+// reqwest's own message is often just "builder error"; the cause is further down the chain
+fn net_err(e: impl std::error::Error) -> Error {
+    let mut msg = format!("network: {e}");
+    let mut src = e.source();
+    while let Some(s) = src {
+        msg.push_str(&format!(": {s}"));
+        src = s.source();
+    }
+    Error::Io(msg)
 }
 
 fn client(timeout: Duration) -> Result<reqwest::blocking::Client, Error> {
