@@ -1,0 +1,340 @@
+name: Release
+
+# Tag-driven: `git tag v1.2.3 && git push --tags` is the whole release ritual.
+# Everything below comes from the tag and the changelog, so a release can
+# never disagree with its own notes. A tag with a "-" (v1.2.3-rc1) becomes a
+# pre-release. Re-run an existing tag from the Actions tab (Run workflow).
+#
+# Produces, all listed in SHA256SUMS.txt:
+#   hamzip-<ver>-setup-x64.exe                   Inno Setup installer (per-user, no UAC)
+#   hamzip-<ver>-{x64,x86,arm64}.msi             MSI (per-user default, all-users option)
+#   hamzip-v<ver>-{x64,x86,arm64}-portable.exe   single exe, no install
+#   hamzip-v<ver>-portable.zip                   hamzip/{x64,x86,arm64}/hamzip.exe
+#   hamzip-v<ver>-linux-{x86_64,aarch64,armv7}   the bare Linux binaries
+#   install.ps1, install.cmd                     script installs (irm ... | iex)
+# plus a .torrent and a magnet QR code (.magnet.png) per download, made by
+# scripts/release_notes.py, which also writes SHA256SUMS.txt and the notes.
+# `hamzip upgrade` (src/upgrade.rs) downloads the portable exes and the Linux
+# binaries by exactly these names, and install.ps1 looks for the rest; change
+# them together.
+# The model isn't built here. It sits on its own release, model-smollm2-135m,
+# uploaded once by hand: a rebuild on another machine may not give the same
+# bytes, and every station needs the identical file.
+# Scoop is not updated here: the manifest lives in Londopy/scoop-bucket, whose
+# Excavator workflow picks up each new release from checkver/autoupdate.
+# No winget job: hamzip isn't on winget.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v1.2.3)"
+        required: true
+        type: string
+
+# read-only everywhere; the release job, which publishes, gets write below
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Gate everything on the changelog first: building every download only to
+  # find the release notes are malformed wastes ten minutes.
+  validate:
+    name: Validate changelog and version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.patchnotes.outputs.latest-version }}
+    steps:
+      - name: Resolve the tag
+        id: tag
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Fails unless CHANGELOG.md is valid Keep a Changelog and its newest
+      # section matches the tag. Pinned: the floating v2 tag once resolved to
+      # a release that silently ignored newer inputs.
+      - name: Validate and check version sync
+        id: patchnotes
+        uses: Londopy/patchnotes@v2.6.0
+        with:
+          file: CHANGELOG.md
+          strict: "true"
+          check-version: ${{ steps.tag.outputs.tag }}
+
+      - name: Cargo.toml agrees too
+        run: |
+          set -euo pipefail
+          pip install --quiet patchnotes==2.6.0
+          patchnotes CHANGELOG.md check-version --against Cargo.toml
+
+  build:
+    name: Build (${{ matrix.label }})
+    needs: validate
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc,  label: x64 }
+          - { target: i686-pc-windows-msvc,    label: x86 }
+          - { target: aarch64-pc-windows-msvc, label: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # rustls' crypto (aws-lc) assembles its x86 code with NASM. The x64 build
+      # uses objects aws-lc-sys ships prebuilt, but there are none for 32-bit.
+      # (arm64 needs clang-cl instead, which the hosted Windows images have.)
+      - name: Install NASM
+        if: matrix.label == 'x86'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "installing NASM failed" }
+          "C:\Program Files\NASM" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+      # .cargo/config.toml links the C runtime statically, so the exes start
+      # on a Windows without the Visual C++ Redistributable
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "stage\${{ matrix.label }}" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\hamzip.exe" "stage\${{ matrix.label }}\hamzip.exe"
+
+      # The installer is x64 only; x86 and arm64 ship as MSIs and portable exes.
+      - name: Install Inno Setup
+        if: matrix.label == 'x64'
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installer
+        if: matrix.label == 'x64'
+        shell: pwsh   # pwsh so /DAppVersion=... is not mangled by Git Bash path conversion
+        run: |
+          $ver = "${{ needs.validate.outputs.tag }}".TrimStart("v")
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$ver "/DBinDir=..\target\${{ matrix.target }}\release" installer\hamzip.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Copy-Item installer\output\*.exe stage\
+
+      # WiX v7. The maintenance fee only applies above US$10k/yr revenue, but
+      # the EULA must be accepted for the binaries to run, and it comes first:
+      # WiX 7 refuses every other command (WIX7015) until it's accepted. pwsh
+      # only fails a step on the last command's exit code, so each is checked.
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 7.0.0
+          if ($LASTEXITCODE -ne 0) { throw "installing wix failed" }
+          wix eula accept wix7
+          if ($LASTEXITCODE -ne 0) { throw "accepting the WiX EULA failed" }
+          wix extension add --global WixToolset.UI.wixext/7.0.0 WixToolset.Util.wixext/7.0.0
+          if ($LASTEXITCODE -ne 0) { throw "adding the WiX extensions failed" }
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $ver = "${{ needs.validate.outputs.tag }}".TrimStart("v")
+          # MSI versions are plain numbers: strip -rc1 etc.
+          $num = ($ver -split "-")[0]
+          # WixUI shows the license from an RTF file; make it from LICENSE-MIT,
+          # the text the setup.exe shows too
+          $text = Get-Content LICENSE-MIT -Raw
+          $sb = [System.Text.StringBuilder]::new()
+          foreach ($ch in $text.ToCharArray()) {
+            $c = [int]$ch
+            if ($ch -eq [char]'\' -or $ch -eq [char]'{' -or $ch -eq [char]'}') { [void]$sb.Append('\' + $ch) }
+            elseif ($ch -eq "`n") { [void]$sb.Append("\par`n") }
+            elseif ($ch -eq "`r") { }
+            elseif ($c -gt 127) { if ($c -gt 32767) { $c -= 65536 }; [void]$sb.Append("\u${c}?") }
+            else { [void]$sb.Append($ch) }
+          }
+          "{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}}\fs18 " + $sb.ToString() + "}" | Set-Content installer\license.rtf -Encoding ascii
+          # run from installer\ so relative paths in the .wxs match the .iss
+          Push-Location installer
+          wix build -arch ${{ matrix.label }} -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
+            -d Version=$num -d "BinDir=..\target\${{ matrix.target }}\release" `
+            -o "..\stage\hamzip-$ver-${{ matrix.label }}.msi" hamzip.wxs
+          if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
+          Pop-Location
+          Remove-Item stage\*.wixpdb -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.label }}
+          path: stage/
+          retention-days: 1
+
+  build-linux:
+    name: Build (linux-${{ matrix.arch }})
+    needs: validate
+    # Pinned to 22.04, not the latest images: a binary linked against a newer
+    # glibc won't start on older distros, and Raspberry Pi OS bookworm has
+    # glibc 2.36. Move it on when GitHub retires these runner images.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64,  target: x86_64-unknown-linux-gnu,      os: ubuntu-22.04 }
+          # a native arm64 runner, so no cross toolchain
+          - { arch: aarch64, target: aarch64-unknown-linux-gnu,     os: ubuntu-22.04-arm }
+          # 32-bit Raspberry Pi OS; there is no armv7 runner, so this one is cross-compiled
+          - { arch: armv7,   target: armv7-unknown-linux-gnueabihf, os: ubuntu-22.04 }
+    env:
+      # only read by the armv7 build: link with the cross gcc, and build
+      # aws-lc's and zstd's C code with it too
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+      CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+      AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install the ARM cross compiler
+        if: matrix.arch == 'armv7'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # named here, with the version, because `hamzip upgrade` downloads this
+      # exact file. The executable bit doesn't survive the artifact upload, so
+      # users chmod +x it after downloading.
+      - name: Stage binary
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          cp "target/$TARGET/release/hamzip" "stage/hamzip-$TAG-linux-$ARCH"
+          file stage/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: stage/
+          retention-days: 1
+
+  release:
+    name: Publish release
+    needs: [validate, build, build-linux]
+    runs-on: windows-latest
+    permissions:
+      contents: write   # create the release and upload assets; the only job that writes
+    env:
+      TAG: ${{ needs.validate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0   # the previous tag, for the compare link
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: build-*
+
+      - name: Assemble the downloads
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # Stable inner folder name (no version) so Scoop's extract_dir is constant
+          $root = "zip\hamzip"
+          foreach ($arch in "x64", "x86", "arm64") {
+            New-Item -ItemType Directory -Force -Path "$root\$arch" | Out-Null
+            Copy-Item "artifacts\build-$arch\$arch\hamzip.exe" "$root\$arch\"
+            # empty "portable" marker: hamzip keeps the model and its data next
+            # to the exe instead of in %LOCALAPPDATA%\hamzip
+            New-Item -ItemType File -Force -Path "$root\$arch\portable" | Out-Null
+            # the same exe on its own, for people who want one file and no
+            # install; `hamzip upgrade` downloads these
+            Copy-Item "artifacts\build-$arch\$arch\hamzip.exe" "dist\hamzip-$tag-$arch-portable.exe"
+          }
+          Compress-Archive -Path $root -DestinationPath "dist\hamzip-$tag-portable.zip"
+          Copy-Item artifacts\build-x64\*-setup-x64.exe dist\
+          Copy-Item artifacts\build-*\*.msi dist\
+          # the Linux binaries, already named by their build job
+          Copy-Item artifacts\build-linux-*\hamzip-* dist\
+          Copy-Item installer\install.ps1, installer\install.cmd dist\
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # torrents + magnet QR codes for every download, SHA256SUMS.txt over
+      # everything, and the release page from CHANGELOG.md (copied verbatim:
+      # `patchnotes show` prints indented text that renders as a code block)
+      - name: Release notes, checksums and torrents
+        shell: pwsh
+        run: |
+          pip install --quiet segno==1.6.6
+          # v* only: the model-smollm2-135m tag isn't a previous version
+          $prev = git describe --tags --abbrev=0 --match "v*" "$env:TAG^" 2>$null
+          if ($LASTEXITCODE -ne 0) { $prev = "" }
+          # add --scoop once Londopy/scoop-bucket has bucket/hamzip.json
+          python scripts\release_notes.py $env:TAG dist --prev "$prev" --out body.md
+          if ($LASTEXITCODE -ne 0) { throw "release_notes.py failed" }
+          "TITLE=$(Get-Content title.txt -Raw)".Trim() | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Get-Content dist\SHA256SUMS.txt
+
+      # Draft first, publish after every asset is uploaded, so `hamzip upgrade`
+      # never sees a half-uploaded release.
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TITLE }}
+          body_path: body.md
+          files: dist/*
+          draft: true
+          prerelease: ${{ contains(env.TAG, '-') }}
+
+      - name: Publish the draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:TAG.Contains("-")) {
+            gh release edit $env:TAG --draft=false
+          } else {
+            gh release edit $env:TAG --draft=false --latest
+          }

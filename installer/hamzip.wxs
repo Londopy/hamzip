@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  hamzip - MSI installer (WiX Toolset v7)
+
+  Built by the release workflow, once per architecture:
+    wix build -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
+              -d Version=1.2.3 -d BinDir=..\target\x86_64-pc-windows-msvc\release
+              -o hamzip-1.2.3-x64.msi installer\hamzip.wxs
+  The workflow also writes installer\license.rtf from LICENSE-MIT first
+  (WixUI shows the license from an RTF file). hamzip is MIT OR Apache-2.0;
+  both installers show the MIT text.
+
+  One-time WiX setup on a dev machine: see windows-installer.md in the
+  londopy-style skill (dotnet tool, two extensions, EULA acceptance).
+  XML comments can't contain two hyphens in a row, so the commands live there.
+
+  hamzip is a command-line tool, so unlike the GUI apps' MSI this one has no
+  shortcuts, no startup entry and no "Launch" checkbox. Instead it puts the
+  install folder on PATH, on by default (the PATH fragment from wix-path.wxs,
+  in WiX v4+ syntax).
+
+  Install scope: per-user by default (no UAC, %LOCALAPPDATA%\Programs\hamzip,
+  same folder as the Inno setup.exe). IT admins install machine-wide with:
+    msiexec /i hamzip-<ver>-x64.msi ALLUSERS=2 MSIINSTALLPERUSER=""
+  Optional msiexec property: ADDTOPATH=0 leaves PATH alone. The PATH entry
+  goes into the installing user's environment (HKCU) even for a machine-wide
+  install, so for every user IT adds the Program Files folder to the system
+  PATH itself.
+
+  Don't install the MSI and the setup.exe side by side; they share a folder.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <!-- the workflow passes -d Version=<numeric version>; MSI versions must be
+       plain numbers, so prerelease suffixes like -rc1 are stripped first -->
+  <?ifndef Version ?>
+    <?define Version = "0.0.0" ?>
+  <?endif?>
+  <?ifndef BinDir ?>
+    <?define BinDir = "..\target\release" ?>
+  <?endif?>
+
+  <!-- Id replaces the old UpgradeCode GUID: any newer MSI with the same Id
+       upgrades an older one in place. Never reuse this Id for a different app. -->
+  <Package Id="Londopy.hamzip"
+           Name="hamzip"
+           Manufacturer="Londopy"
+           Version="$(var.Version)"
+           Language="1033"
+           Scope="perUserOrMachine">
+
+    <!-- same-version reinstall works (handy for testing); downgrades are refused -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of hamzip is already installed." />
+
+    <!-- one msi file, no loose .cab next to it -->
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Add/Remove Programs links. No ARPPRODUCTICON: hamzip has no icon yet -->
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Londopy/hamzip" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/Londopy/hamzip/issues" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/Londopy/hamzip/releases" />
+
+    <!-- option for msiexec: ADDTOPATH=0 skips the PATH entry. Secure so it
+         survives into the elevated part of an all-users install. -->
+    <Property Id="ADDTOPATH" Value="1" Secure="yes" />
+
+    <!-- UI: license page + Install button. No "Launch" checkbox: there is no
+         window to launch -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+
+    <!-- No util:CloseApplication as in the GUI apps' MSI: Windows Installer's
+         own Restart Manager prompt asks to close a running hamzip instead of
+         killing it halfway through decoding a message. -->
+
+    <Feature Id="Main" Title="hamzip" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="PathEntry" />
+    </Feature>
+
+    <!-- per-user: %LOCALAPPDATA%\Programs\hamzip
+         all users: C:\Program Files\hamzip (Program Files (x86) for the x86 msi) -->
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="hamzip">
+
+        <Component Id="MainExecutable">
+          <File Id="MainExe" Source="$(var.BinDir)\hamzip.exe" KeyPath="yes" />
+          <!-- `hamzip upgrade` renames the running exe to hamzip.old and
+               deletes that the next time hamzip starts; uninstall removes one
+               that is still there -->
+          <RemoveFile Id="RemoveUpgradeOld" Name="hamzip.old" On="uninstall" />
+        </Component>
+
+        <!-- the install folder on PATH, unless ADDTOPATH=0. Part="last" appends
+             rather than replaces, and Permanent="no" takes it out again on
+             uninstall. System="no" writes the user's environment (HKCU), so it
+             never needs more privilege than the install itself. -->
+        <Component Id="PathEntry" Condition="ADDTOPATH = 1">
+          <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]"
+                       Part="last" Action="set" System="no" Permanent="no" />
+          <RegistryValue Root="HKMU" Key="Software\Londopy\hamzip"
+                         Name="PathEntry" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- No install.ini marker: `hamzip upgrade` doesn't read one. In a folder it
+         can't write to (an all-users install) it says to get the new MSI.
+
+         The data folder (%LOCALAPPDATA%\hamzip, which holds the downloaded
+         model) is left alone, unlike the setup.exe's uninstall. A major upgrade
+         uninstalls the old version first, so a RemoveFile here would delete the
+         137 MB model on every upgrade, and a station may have no internet to
+         fetch it again.
+
+         No LondopyUnregister action: hamzip has no .londopy files. -->
+  </Package>
+</Wix>
