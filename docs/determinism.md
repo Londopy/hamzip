@@ -23,6 +23,7 @@ These are for model `smollm2-135m.hzm` (SHA-256 `4f3b006a...c919`) and message f
 | Machine | Dot product | Tests and golden vectors | 100 messages | 2000 messages |
 |---|---|---|---|---|
 | Windows 11, x86-64 (Core Ultra 9), the reference | AVX2 | pass | round trip | round trip |
+| Windows 11, the published 32-bit `hamzip-v0.1.0-x86-portable.exe` | plain Rust | golden vectors exact | round trip, same digest | not run |
 | GitHub `ubuntu-24.04-arm`, native aarch64 | plain Rust (NEON) | pass | round trip, same digest | round trip, same digest |
 | GitHub `ubuntu-24.04`, x86-64 Linux | AVX2 | pass | round trip, same digest | encoded, same digest |
 | GitHub `ubuntu-24.04`, armv7 32-bit under QEMU | plain Rust | library and golden tests pass | encoded, same digest | not run |
@@ -34,5 +35,5 @@ Messages from the earlier local runs under Docker's QEMU (aarch64 and armv7, bef
 ## Not checked yet
 
 - A real Raspberry Pi, including its speed. The native aarch64 runner shows the arithmetic agrees on ARM; a Pi's slower cores and memory will decode more slowly.
-- The Windows x86 (32-bit) and arm64 builds.
+- The Windows arm64 build.
 - A message sent over the air, for example over VARA FM, timed with and without hamzip.
