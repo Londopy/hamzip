@@ -21,10 +21,11 @@ fuel 1/2 tank. Water OK through tomorrow. Need: 40 cots, infant formula. Next re
 
 ## Features
 
-- A typical 100 to 500 character message comes out at about 2.7 bits per character, framing included. Plain text is 8; zstd with a dictionary trained on ham traffic gets about 5.
+- A typical message comes out at about 2.6 bits per character, framing included. Plain text is 8; zstd with a dictionary trained on ham traffic gets about 5.
 - The model runs on integer arithmetic only, so a Windows PC, a Linux laptop and a Raspberry Pi compute exactly the same probabilities. One different probability would turn the rest of the message into garbage, which is why no floating point is involved anywhere in the coding path.
 - Every message carries a CRC-32 of the text, and model-coded ones also carry two bytes of the model's SHA-256. A station with a different model gets a clear error naming both, never wrong text.
 - Short or odd text falls back to zstd or plain bytes automatically, whichever is smallest. One header byte says which.
+- For modes that only carry text (fldigi keyboard modes, a Winlink message body), `--text` writes the message as a line of `hz:` base64 you can paste. A message of a few hundred characters comes out at about a third of its length; short ones gain less, and hamzip tells you when sending the text as it is would be shorter. The mode has to pass both cases, digits, `+`, `/`, `=` and `:`, which rules out JS8Call's restricted alphabet.
 - The format, the arithmetic and the model are published, so anyone can decode what they hear (see [On the air](#on-the-air)).
 
 ## Install
@@ -72,7 +73,17 @@ The binaries are not code-signed, so Windows SmartScreen may warn on first run. 
 hamzip encode message.txt -o message.hz     # or pipe: hamzip encode < message.txt > message.hz
 hamzip decode message.hz                    # prints the text
 hamzip decode message.hz -o message.txt
+hamzip info message.hz                      # mode, size and model, without decoding
 ```
+
+For a text-only mode, add `--text` and paste the line it prints; `decode` and `info` take the line (or a file holding it) the same way as a binary message, line breaks and all:
+
+```console
+$ hamzip encode letter.txt --text
+hz:EE87/1zQWBJVi5CO8FmpYaBUv3bLpQryNOtZdUT6hx30E3QLTO/QcM8n26O1gvIH++u6xQtTrmTomb26GlzKSDGcGUCVq5Eru+c=
+```
+
+That's a 271-character message in 103 characters of text.
 
 In PowerShell, use the file arguments and `-o` rather than `<` and `>`: Windows PowerShell 5.1 re-encodes piped output as UTF-16, which turns a message into something hamzip can't read.
 
@@ -94,11 +105,17 @@ Measured on 132 held-out messages from the test corpus (Winlink-style email, ICS
 | deflate (zip, gzip) | 6.22 | 78% |
 | zstd -19 | 6.36 | 80% |
 | zstd -19 with a 16 KB dictionary trained on ham traffic | 4.96 | 62% |
-| **hamzip** | **2.61** | **33%** |
+| **hamzip** | **2.58** | **32%** |
 
 Ordinary email and ICS-213 text does best, around 1.8 to 2 bits per character before framing. Callsign lists, grid squares and numbers cost more, about 3 to 3.5, because nothing can predict a callsign it has never seen. The corpus is synthetic, so expect different numbers on your own traffic; `tools/bench.py` reproduces the table.
 
-Speed on a Core Ultra 9 laptop is about 520 tokens a second encoding and 110 decoding, so a typical 300-character message takes about a second to decode. Decoding has to run one token at a time, so it is the slow side. On a Raspberry Pi it is much slower; measure yours with `hamzip bench`.
+Speed on a Core Ultra 9 laptop is about 450 to 650 tokens a second encoding and 100 to 110 decoding, so a typical 300-character message takes about a second to decode. Decoding has to run one token at a time, so it is the slow side. 110 tokens a second is about 700 bits of compressed message per second: on a link slower than that, hamzip decodes faster than the radio delivers, and on a faster one (wide VHF/UHF modes) the decoder becomes the bottleneck for long messages. A Raspberry Pi is several times slower than this laptop; measure yours with `hamzip bench`.
+
+## Related work
+
+Using a language model's predictions with an arithmetic coder isn't new. [LLMZip](https://arxiv.org/abs/2306.04050) (2023) did it with LLaMA-7B; Fabrice Bellard's [ts_zip](https://bellard.org/ts_zip/) and [NNCP](https://bellard.org/nncp/) compress files with small neural models; [llama-zip](https://github.com/AlexBuz/llama-zip) works with any GGUF model through llama.cpp, whose results, its own notes say, aren't guaranteed to match between machines.
+
+hamzip is aimed at a narrower job: short messages between two stations on unlike hardware, which must decode bit for bit, from a model and a format anyone can reimplement from the published specifications. That is what the integer-only engine, the 7-byte framing and the documents in `docs/` are for. No ham radio project doing this turned up when this one started.
 
 ## On the air
 
@@ -156,7 +173,7 @@ Installers: [Inno Setup 6](https://jrsoftware.org/isinfo.php) builds the setup.e
 
 ## How it works
 
-1. The text is split into tokens with the model's byte-level BPE tokenizer.
+1. The text is split into tokens with the model's byte-level BPE tokenizer. Both sides first run the model over a fixed line, "Amateur radio message sent over Winlink:", which is never sent but gives the model a start; messages come out about 1% smaller for it on average.
 2. For each token, the model gives a probability for every possible next token. Those probabilities are turned into integer frequencies, and a 64-bit range coder spends about `-log2(p)` bits on the token that actually comes next.
 3. The receiver starts the model from the same state, so it gets the same frequencies, reads off one token at a time, and stops at the end-of-text token.
 
@@ -175,6 +192,7 @@ src/
   lib.rs         message format: model, zstd and raw modes
   main.rs        CLI
   upgrade.rs     model download, self-upgrade, update notice
+  armor.rs       hz: text form for text-only modes
 tests/golden/    fixed messages and the bytes they must encode to
 tools/           corpus benchmark, model converter, message mixer (Python)
 corpus/          test messages written for this project

@@ -46,7 +46,7 @@ You'll get an acknowledgement within 72 hours, and an assessment within 7 days.
   sent it, and the CRC-32 catches corruption, not tampering.
 - Two different models sharing the 2-byte model id. The id catches the wrong model by
   accident; it doesn't authenticate one.
-- A message that takes as long to decode as the longest legitimate one (2047 tokens). That
+- A message that takes as long to decode as the longest legitimate one (2037 tokens). That
   is slow on a Raspberry Pi, but it is bounded.
 - A damaged message failing to decode. There is no error correction on purpose; send
   hamzip messages over a link with ARQ.
