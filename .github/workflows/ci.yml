@@ -45,7 +45,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       # The tests need the 137 MB model, which isn't in the repo. The key is its
-      # SHA-256 (MODEL_SHA256 in src/upgrade.rs), so a new model gets a new
+      # SHA-256 (the first entry of MODELS in src/lib.rs), so a new model gets a new
       # cache, and the cache is only saved when the job passes, which needs the
       # download to have passed hamzip's hash check.
       - name: Cache the model

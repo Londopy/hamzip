@@ -18,7 +18,7 @@ The encoder tries all three and sends the smallest. Raw wins for very short text
 
 A decoder that gets a model-mode message whose model id differs from its own model reports both ids and stops. It never prints text decoded with the wrong model.
 
-The CRC covers the decoded text rather than the header, because every header byte is already checked by what it does. A damaged format nibble or unknown mode is refused outright; a mode byte flipped to another valid mode decodes the body the wrong way, and that text fails the CRC; damaged model id bytes give the wrong-model error. Two different models share an id only by a 1 in 65536 chance, and then the CRC fails the message too. So a decoder either prints exactly the text that was sent or refuses.
+The CRC covers the decoded text rather than the header, because every header byte is already checked by what it does. A damaged format nibble or unknown mode is refused outright. A mode byte flipped to another valid mode is caught as well: a model message read as zstd is refused by the zstd decoder, a zstd or raw message read as model mode fails the model id check, and a model message read as raw fails the CRC. Damaged model id bytes give the wrong-model error. Two different models share an id only by a 1 in 65536 chance, and then the CRC fails the message too. So, short of the 1 in 2^32 chance that damaged text still matches its CRC, a decoder either prints exactly the text that was sent or refuses.
 
 ## Model mode
 

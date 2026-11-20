@@ -94,7 +94,7 @@ jobs:
 
       - name: 100 messages with smollm2-360m
         run: |
-          ./target/release/hamzip -m models360/smollm2-360m.hzm bench mix100 ${{ matrix.encode_only }} | tail -3 | tee bench360.txt
+          ./target/release/hamzip -m models360/smollm2-360m.hzm bench mix100 | tail -3 | tee bench360.txt
           grep -qx "digest $DIGEST_100_360M" bench360.txt
 
   armv7:

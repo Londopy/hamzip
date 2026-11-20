@@ -11,12 +11,13 @@ hamzip bench mix                    # add --encode-only for a quick digest on a 
 
 `mix.py` writes the same synthetic messages on every machine (lines spliced from the corpus with a fixed seed). `bench` encodes and decodes each one, fails if any message doesn't round-trip, and prints a SHA-256 over every model-coded message. Equal digests mean two machines produce identical model-coded bytes, so each can decode the other's messages. Messages that went out as zstd or raw are left out of the digest, because zstd's output may change with its version without affecting anyone's ability to decode it.
 
-| Message set | Digest |
-|---|---|
-| `--count 2000` | `c945be8d4212896dd07f688dd80cd7115e6b344c2111db4430e47d7a50a1872b` |
-| `--count 100` (the first 100 of the same set) | `43ff66700a0f95a8aedbffe44022f964d01a8555d99ecffbefd885dbebefef7c` |
+| Model | Message set | Digest |
+|---|---|---|
+| smollm2-135m | `--count 2000` | `c945be8d4212896dd07f688dd80cd7115e6b344c2111db4430e47d7a50a1872b` |
+| smollm2-135m | `--count 100` (the first 100 of the same set) | `43ff66700a0f95a8aedbffe44022f964d01a8555d99ecffbefd885dbebefef7c` |
+| smollm2-360m | `--count 100` | `9b534c26aa5f97f1c037c229ffd7729cf047d1f3cd5acb30c363b5c8355f072e` |
 
-These are for model `smollm2-135m.hzm` (SHA-256 `4f3b006a...c919`) and message format 1. `cargo test` also runs the golden vectors in `tests/golden/` and a pinned hash of the frequency tables. The [Determinism workflow](../.github/workflows/determinism.yml) repeats all of this on GitHub for every push to main and once a week.
+These are for message format 1; run `bench` with `--model smollm2-360m` for the last row. `cargo test` also runs the golden vectors in `tests/golden/` and a pinned hash of the frequency tables. The [Determinism workflow](../.github/workflows/determinism.yml) repeats all of this on GitHub for every push to main and once a week.
 
 ## Results
 
@@ -34,6 +35,7 @@ Messages from the earlier local runs under Docker's QEMU (aarch64 and armv7, bef
 
 ## Not checked yet
 
+- smollm2-360m anywhere but the Windows dev machine, where all 100 messages round-trip; the Determinism workflow adds it on ARM and x86 Linux.
 - A real Raspberry Pi, including its speed. The native aarch64 runner shows the arithmetic agrees on ARM; a Pi's slower cores and memory will decode more slowly.
 - The Windows arm64 build.
 - A message sent over the air, for example over VARA FM, timed with and without hamzip.

@@ -36,12 +36,12 @@ change falls into one of two kinds:
 The coding path uses integers only. Floating-point results can differ between CPUs,
 compilers and math libraries, so floats stay out of the engine.
 
-## Publishing the model (maintainers)
+## Publishing a model (maintainers)
 
-The model file lives on its own release, tagged `model-smollm2-135m`, which
-`hamzip model download` fetches from. Upload the canonical file once, as a pre-release (or
-with "Set as the latest release" unticked), so it never becomes the latest release that
-`hamzip upgrade`, install.ps1 and the `releases/latest` links point at:
+Each model file lives on its own release, tagged `model-<name>`, which
+`hamzip model download <name>` fetches from. Upload the canonical file once, as a
+pre-release (or with "Set as the latest release" unticked), so it never becomes the latest
+release that `hamzip upgrade`, install.ps1 and the `releases/latest` links point at:
 
 ```bash
 gh release create model-smollm2-135m models/smollm2-135m.hzm --prerelease \
@@ -49,8 +49,9 @@ gh release create model-smollm2-135m models/smollm2-135m.hzm --prerelease \
   --notes "SHA-256 4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919"
 ```
 
-Never replace that file. A different model gets a new file name, a new tag and its own
-entry in `src/upgrade.rs` and [docs/model-format.md](docs/model-format.md).
+Never replace a published file. A new model gets its own name, file and tag, an entry in
+`MODELS` in `src/lib.rs` (whose first two hash bytes must not match an existing one's; a
+test checks), and a row in [docs/model-format.md](docs/model-format.md).
 
 ## AI-assisted contributions
 

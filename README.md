@@ -22,10 +22,10 @@ fuel 1/2 tank. Water OK through tomorrow. Need: 40 cots, infant formula. Next re
 ## Features
 
 - A typical message comes out at about 2.6 bits per character, framing included, or 2.3 with the larger model. Plain text is 8; zstd with a dictionary trained on the same kind of traffic gets about 5.
-- The model runs on integer arithmetic only, so every machine computes exactly the same probabilities. One different probability would turn the rest of the message into garbage, which is why no floating point is involved anywhere in the coding path. So far that has been checked on Windows (64- and 32-bit), Linux on x86-64, and Linux on 64-bit ARM servers, the same build a 64-bit Raspberry Pi runs; it hasn't been run on a real Pi yet ([docs/determinism.md](docs/determinism.md)).
+- The model runs on integer arithmetic only, so every machine computes exactly the same probabilities. One different probability would turn the rest of the message into garbage, which is why no floating point is involved anywhere in the coding path. So far that has been checked on Windows (64- and 32-bit), Linux on x86-64, and Linux on 64-bit ARM servers, the same build a 64-bit Raspberry Pi runs; it hasn't been run on a real Pi yet ([docs/determinism.md](docs/determinism.md)). Those checks used the default model; smollm2-360m has so far run only on the dev machine.
 - Every message carries a CRC-32 of the text, and model-coded ones also carry two bytes of the model's SHA-256. A station with a different model gets an error showing both model ids, never wrong text.
 - Short or odd text falls back to zstd or plain bytes automatically, whichever is smallest. One header byte says which.
-- For channels that deliver text intact but not files, such as a Winlink message body, `--text` writes the message as a line of `hz:` base64 you can paste. A message of a few hundred characters comes out at about a third of its length; short ones gain less, and hamzip tells you when sending the text as it is would be shorter. The mode has to pass both cases, digits, `+`, `/`, `=` and `:`, which rules out JS8Call's restricted alphabet. Over a keyboard mode without ARQ (most fldigi modes), a single wrong character makes the message undecodable; the CRC tells you, but nothing can recover it, so use those only with an ARQ layer such as FLARQ.
+- For channels that deliver text intact but not files, such as a Winlink message body, `--text` writes the message as a line of `hz:` base64 you can paste. The line is base64, so it is a third longer than the binary message: a message of a few hundred characters comes out at a little under half its length (a median 45% on the test corpus); short ones gain less, and hamzip tells you when sending the text as it is would be shorter. The mode has to pass both cases, digits, `+`, `/`, `=` and `:`, which rules out JS8Call's restricted alphabet. Over a keyboard mode without ARQ (most fldigi modes), a single wrong character makes the message undecodable; the CRC tells you, but nothing can recover it, so use those only with an ARQ layer such as FLARQ.
 - The format, the arithmetic and the model are published, so anyone can decode what they hear (see [On the air](#on-the-air)).
 
 ## Install
@@ -61,7 +61,7 @@ chmod +x hamzip-v0.1.0-linux-aarch64 && sudo mv hamzip-v0.1.0-linux-aarch64 /usr
 hamzip model download
 ```
 
-That fetches `smollm2-135m.hzm` (137 MB) and refuses to keep it unless its SHA-256 is `4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919`. Do it once while you have internet; hamzip itself never needs a connection after that. For the larger, slower model that makes messages about 9% smaller, also run `hamzip model download smollm2-360m` (365 MB, see [Choosing a model](#choosing-a-model)).
+That fetches `smollm2-135m.hzm` (137 MB) and refuses to keep it unless its SHA-256 is `4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919`. Do it once while you have internet; hamzip itself never needs a connection after that. For the larger, slower model that makes messages about 8% smaller, also run `hamzip model download smollm2-360m` (365 MB, see [Choosing a model](#choosing-a-model)).
 
 The binaries are not code-signed, so Windows SmartScreen may warn on first run. Every release ships `SHA256SUMS.txt`; check a download with `(Get-FileHash .\<file> -Algorithm SHA256).Hash` on Windows or `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux.
 
@@ -111,11 +111,11 @@ Ordinary email and ICS-213 text does best, around 1.8 to 2 bits per character be
 
 The design notes this project started from aimed for under 1.5 bits per character on 100 to 500 character messages. Neither model gets there: they reach 2.41 and 2.18 before framing, 2.64 and 2.43 with it. A model small enough for a laptop (under about 500 MB) doesn't predict callsigns, numbers and terse traffic well enough; the remaining options, a much larger model or one fine-tuned on a large body of real traffic, are out of reach for now.
 
-Speed on a Core Ultra 9 laptop with the default model is about 450 to 650 tokens a second encoding and 100 to 110 decoding, so a typical 300-character message takes about a second to decode; smollm2-360m decodes at about half that. Decoding has to run one token at a time, and most of its time goes to coordinating threads over many small matrix multiplies, so more cores don't help much. 110 tokens a second is about 700 bits of compressed message per second. On a link slower than that, which covers most HF, hamzip decodes faster than the radio delivers. On a faster one, such as VARA FM, it doesn't, and a long message waits on the decoder; a short one still decodes in about a second. A Raspberry Pi hasn't been measured; expect it to be slower than this laptop, and measure yours with `hamzip bench`.
+Speed on a Core Ultra 9 laptop with the default model is about 450 to 650 tokens a second encoding and 100 to 110 decoding, so a typical 300-character message takes about a second to decode; smollm2-360m decodes at about half that. Decoding has to run one token at a time, and most of its time goes to coordinating threads over many small matrix multiplies, so more cores don't help much. 110 tokens a second is about 700 bits of compressed message per second (about 350 with smollm2-360m). On a link slower than that, which covers most HF, hamzip decodes faster than the radio delivers. On a faster one, such as VARA FM, it doesn't, and a long message waits on the decoder; a short one still decodes in about a second. A Raspberry Pi hasn't been measured; expect it to be slower than this laptop, and measure yours with `hamzip bench`.
 
 ### Choosing a model
 
-Both stations need the same model; every message names the one it was coded with. smollm2-135m is the default and the faster one. smollm2-360m makes messages about 9% smaller at half the decode speed, a good trade on slow HF links where airtime is what's scarce:
+Both stations need the same model; every model-coded message names the one it was coded with. smollm2-135m is the default: faster, and about 290 MB of memory while running. smollm2-360m makes messages about 8% smaller on 100 to 500 character text, decodes at about half the speed and uses about 740 MB. On a typical 174-character SITREP it saves 5 bytes and takes 0.8 seconds longer to decode, so it only pays off in total time on links slower than roughly 100 bits per second; it can still be worth it where airtime on a shared frequency is what's scarce:
 
 ```bash
 hamzip model download smollm2-360m
@@ -160,6 +160,7 @@ Equal digests mean both machines produce identical messages, so each can decode 
 - A real Raspberry Pi. The ARM build has matched the x86 reference on GitHub's ARM servers and under emulation, but not on a Pi, and a Pi's speed is unmeasured.
 - Sending over the air. The design calls for timing real messages over a VARA FM link with and without hamzip; that hasn't been done, and neither has any test over Winlink, FreeDATA, ARDOP or packet.
 - The Windows arm64 build, which is built and published but has never been run.
+- smollm2-360m anywhere but the Windows dev machine; the Determinism workflow checks it on ARM and x86 Linux from the next release on.
 - Whether the FCC sees a published model file as public documentation (see [On the air](#on-the-air)).
 
 ## Configuration
@@ -168,8 +169,8 @@ hamzip looks for the model in this order:
 
 | Where | Notes |
 |---|---|
-| `--model <file>` or `HAMZIP_MODEL` | Any path. |
-| `smollm2-135m.hzm` next to the hamzip executable | Handy for portable installs. |
+| `--model <name or file>` or `HAMZIP_MODEL` | A published model's name (`hamzip model list`) or any path. A path always wins; with a name, `decode` still picks whichever installed model a message names. |
+| `<name>.hzm`, such as `smollm2-135m.hzm`, next to the hamzip executable | Handy for portable installs. |
 | The data folder | `%LOCALAPPDATA%\hamzip` on Windows, `~/.local/share/hamzip` on Linux. `hamzip model download` saves here. A file named `portable` next to the exe makes the exe's folder the data folder. |
 
 `HAMZIP_NO_UPDATE_CHECK=1` turns off the daily update notice; it is also off when `CI` is set or stderr isn't a terminal.
