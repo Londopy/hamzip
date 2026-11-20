@@ -4,6 +4,17 @@ All notable changes to hamzip are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- A second published model, smollm2-360m (365 MB): messages about 9% smaller, decoding at about half the speed. Get it with `hamzip model download smollm2-360m` and pick it with `--model smollm2-360m`.
+- `--model` takes a published model's name as well as a path, and `hamzip model list` shows which models are installed.
+
+### Changed
+
+- `decode` and `info` pick whichever installed model a message was coded with, so a station can keep both models.
+- A message for a model you don't have now names that model and says how to get it, instead of showing only its id.
+- The README states the compression and speed limits plainly, says what hasn't been tested yet, and covers more of Part 97.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added

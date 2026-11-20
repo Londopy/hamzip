@@ -18,6 +18,8 @@ The encoder tries all three and sends the smallest. Raw wins for very short text
 
 A decoder that gets a model-mode message whose model id differs from its own model reports both ids and stops. It never prints text decoded with the wrong model.
 
+The CRC covers the decoded text rather than the header, because every header byte is already checked by what it does. A damaged format nibble or unknown mode is refused outright; a mode byte flipped to another valid mode decodes the body the wrong way, and that text fails the CRC; damaged model id bytes give the wrong-model error. Two different models share an id only by a 1 in 65536 chance, and then the CRC fails the message too. So a decoder either prints exactly the text that was sent or refuses.
+
 ## Model mode
 
 The text is UTF-8. It is split into tokens with the model's byte-level BPE (see [model-format.md](model-format.md)), and the end-of-text token is appended. A message is limited to `max_ctx - 11` tokens, 2037 for SmolLM2-135M or roughly 7000 characters; longer text goes out as zstd or raw.
