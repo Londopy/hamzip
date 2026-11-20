@@ -50,7 +50,7 @@ jobs:
       # download to have passed hamzip's hash check.
       - name: Cache the model
         id: model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: models
           key: model-${{ runner.os }}-4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919
