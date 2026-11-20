@@ -93,7 +93,11 @@ impl fmt::Display for Error {
                     describe_model(*ours)
                 )?;
                 if let Some(name) = model_name(*sender) {
-                    write!(f, "; get it with `hamzip model download {name}`")?;
+                    write!(
+                        f,
+                        "; pass --model {name} if you have it, or get it with \
+                         `hamzip model download {name}`"
+                    )?;
                 }
                 Ok(())
             }
@@ -469,6 +473,11 @@ mod tests {
     fn published_models_have_distinct_ids_and_the_default_is_shipped() {
         let ids: std::collections::HashSet<_> = MODELS.iter().map(|(_, s)| id_of(s)).collect();
         assert_eq!(ids.len(), MODELS.len());
-        assert_eq!(model_name(test_model().id()), Some(MODELS[0].0));
+        let sha: String = test_model()
+            .sha256
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(sha, MODELS[0].1);
     }
 }

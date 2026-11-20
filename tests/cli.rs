@@ -5,9 +5,14 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn hamzip(args: &[&str], stdin: &[u8]) -> (bool, String, String) {
+    // an empty data folder, so models installed on this machine don't change the answers
+    let data = std::env::temp_dir().join(format!("hamzip-cli-test-{}", std::process::id()));
     let mut child = Command::new(env!("CARGO_BIN_EXE_hamzip"))
         .args(args)
         .env("HAMZIP_NO_UPDATE_CHECK", "1")
+        .env_remove("HAMZIP_MODEL")
+        .env("LOCALAPPDATA", &data)
+        .env("XDG_DATA_HOME", &data)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -55,6 +60,42 @@ fn raw_messages_decode_and_describe_without_a_model() {
 fn a_truncated_message_is_refused_by_info() {
     let (ok, _, err) = hamzip(&["info"], &[0x10, 0xAB]);
     assert!(!ok && err.contains("too short"), "{err}");
+}
+
+#[test]
+fn a_message_for_a_model_not_installed_names_it() {
+    // model mode, then the id of smollm2-360m
+    let msg = [0x10, 0x6f, 0x56, 1, 2, 3, 4, 5, 6];
+    let (ok, _, err) = hamzip(&["decode"], &msg);
+    assert!(
+        !ok && err.contains("model smollm2-360m is not installed"),
+        "{err}"
+    );
+    assert!(err.contains("hamzip model download smollm2-360m"), "{err}");
+    let (ok, out, _) = hamzip(&["info"], &msg);
+    assert!(
+        ok && out.contains("coded with model smollm2-360m (6f56..)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn model_list_shows_both_models() {
+    let (ok, out, _) = hamzip(&["model", "list"], b"");
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("smollm2-135m (default)") && out.contains("smollm2-360m"),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_unknown_model_name_is_refused_before_any_download() {
+    let (ok, _, err) = hamzip(&["model", "download", "nope"], b"");
+    assert!(
+        !ok && err.contains("no published model named nope"),
+        "{err}"
+    );
 }
 
 fn crc32(data: &[u8]) -> u32 {

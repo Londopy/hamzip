@@ -111,36 +111,81 @@ fn find_installed(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// `--model` is a path or a published model's name; without it, the default model.
-fn model_path(given: &Option<PathBuf>) -> Result<PathBuf, Error> {
-    let name = match given {
-        Some(p) => match p.to_str().filter(|s| hamzip::model_sha256(s).is_some()) {
-            Some(name) => name.to_string(),
-            None => return Ok(p.clone()),
-        },
-        None => hamzip::MODELS[0].0.to_string(),
-    };
-    find_installed(&name).ok_or_else(|| {
-        Error::Io(format!(
-            "model {name} is not installed: run `hamzip model download {name}`, or pass --model \
-             with the path to a model file"
-        ))
-    })
+/// The published model `--model` names, if it names one rather than a file.
+fn published(given: &Option<PathBuf>) -> Option<&'static str> {
+    let s = given.as_ref()?.to_str()?;
+    hamzip::MODELS.iter().map(|(n, _)| *n).find(|n| *n == s)
+}
+
+/// `--model` set to a file of the user's own, which then always wins.
+fn custom_path(given: &Option<PathBuf>) -> bool {
+    given.is_some() && published(given).is_none()
+}
+
+fn not_installed(name: &str) -> Error {
+    let other = hamzip::MODELS
+        .iter()
+        .map(|(n, _)| *n)
+        .find(|n| *n != name && find_installed(n).is_some());
+    let hint = other
+        .map(|o| format!(", or pass --model {o}"))
+        .unwrap_or_default();
+    Error::Io(format!(
+        "model {name} is not installed: run `hamzip model download {name}`{hint}"
+    ))
+}
+
+/// The file hamzip encodes with, and the published model it has to be, if any.
+fn model_path(given: &Option<PathBuf>) -> Result<(PathBuf, Option<&'static str>), Error> {
+    if let (Some(p), true) = (given, custom_path(given)) {
+        return Ok((p.clone(), None));
+    }
+    let name = published(given).unwrap_or(hamzip::MODELS[0].0);
+    find_installed(name)
+        .map(|p| (p, Some(name)))
+        .ok_or_else(|| not_installed(name))
+}
+
+/// Loads a model file, and when it should be a published model, checks it is: a
+/// damaged or rebuilt file would code messages nobody else can read.
+fn load_at(path: &Path, name: Option<&str>) -> Result<Model, Error> {
+    let m = Model::load(path).map_err(|e| match e {
+        Error::Io(_) if name.is_none() && !path.exists() => Error::Io(format!(
+            "{}: no such file, and not a published model's name (see `hamzip model list`)",
+            path.display()
+        )),
+        Error::Io(_) => e,
+        e => Error::Io(format!("{}: {e}", path.display())),
+    })?;
+    if let Some(name) = name {
+        let sha: String = m.sha256.iter().map(|b| format!("{b:02x}")).collect();
+        if hamzip::model_sha256(name) != Some(sha.as_str()) {
+            return Err(Error::Io(format!(
+                "{} is not the published {name} (its SHA-256 differs); run `hamzip model \
+                 download {name}` to replace it",
+                path.display()
+            )));
+        }
+    }
+    Ok(m)
 }
 
 fn load(given: &Option<PathBuf>) -> Result<Model, Error> {
-    let path = model_path(given)?;
-    Model::load(&path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))
+    let (path, name) = model_path(given)?;
+    load_at(&path, name)
 }
 
-/// The model to decode a model-mode `msg` with: the one asked for, or else the
-/// published model the message names, so a station can keep both installed.
+/// The model to decode a model-mode `msg` with: the published model the message
+/// names, so a station can keep both, unless `--model` points at a file of its own.
 fn model_for(given: &Option<PathBuf>, msg: &[u8]) -> Result<Model, Error> {
-    match msg
+    let wanted = msg
         .get(1..3)
-        .and_then(|id| hamzip::model_name([id[0], id[1]]))
-    {
-        Some(name) if given.is_none() => load(&Some(PathBuf::from(name))),
+        .and_then(|id| hamzip::model_name([id[0], id[1]]));
+    match wanted {
+        Some(name) if !custom_path(given) => match find_installed(name) {
+            Some(p) => load_at(&p, Some(name)),
+            None => Err(not_installed(name)),
+        },
         _ => load(given),
     }
 }
@@ -199,15 +244,14 @@ fn info(msg: &[u8], given: &Option<PathBuf>) -> Result<(), Error> {
     if mode == Mode::Model {
         let id = [msg[1], msg[2]];
         println!("coded with model {}", hamzip::describe_model(id));
-        match (hamzip::model_name(id), given) {
-            (Some(name), None) => match find_installed(name) {
+        match hamzip::model_name(id) {
+            Some(name) if !custom_path(given) => match find_installed(name) {
                 Some(p) => println!("installed here: {}", p.display()),
                 None => println!("not installed here; get it with `hamzip model download {name}`"),
             },
-            (_, Some(_)) => {
-                let path = model_path(given)?;
-                let m = Model::load(&path)
-                    .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+            _ if given.is_some() => {
+                let (path, name) = model_path(given)?;
+                let m = load_at(&path, name)?;
                 let verdict = if m.id() == id {
                     "matches"
                 } else {
@@ -215,7 +259,7 @@ fn info(msg: &[u8], given: &Option<PathBuf>) -> Result<(), Error> {
                 };
                 println!("{verdict} {}", path.display());
             }
-            (None, None) => {}
+            _ => {}
         }
     }
     Ok(())
@@ -357,7 +401,10 @@ fn run(cli: &Cli) -> Result<(), Error> {
         Cmd::Model {
             cmd: ModelCmd::Download { name, to },
         } => {
-            let name = name.as_deref().unwrap_or(hamzip::MODELS[0].0);
+            let name = name
+                .as_deref()
+                .or(published(&cli.model))
+                .unwrap_or(hamzip::MODELS[0].0);
             let path = upgrade::download_model(name, &to.clone().unwrap_or_else(data_dir))?;
             println!("saved {}", path.display());
             Ok(())
@@ -377,7 +424,7 @@ fn run(cli: &Cli) -> Result<(), Error> {
         Cmd::Model {
             cmd: ModelCmd::Path,
         } => {
-            println!("{}", model_path(&cli.model)?.display());
+            println!("{}", model_path(&cli.model)?.0.display());
             Ok(())
         }
         Cmd::Upgrade { check, yes } => upgrade::upgrade(*check, *yes),
