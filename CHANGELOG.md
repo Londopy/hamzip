@@ -4,9 +4,11 @@ All notable changes to hamzip are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-19
+
 ### Added
 
-- A second published model, smollm2-360m (365 MB): messages about 9% smaller, decoding at about half the speed. Get it with `hamzip model download smollm2-360m` and pick it with `--model smollm2-360m`.
+- A second published model, smollm2-360m (365 MB): messages about 8% smaller on 100 to 500 character text, decoding at about half the speed. Get it with `hamzip model download smollm2-360m` and pick it with `--model smollm2-360m`.
 - `--model` takes a published model's name as well as a path, and `hamzip model list` shows which models are installed.
 
 ### Changed
@@ -29,5 +31,6 @@ All notable changes to hamzip are listed here. The format follows [Keep a Change
 - Golden vectors: fixed messages and the exact bytes they must encode to, checked by `cargo test`.
 - Downloads for Windows (installer, MSIs, portable exes and zip, `install.ps1`) and for Linux on x86_64, aarch64 and armv7 (Raspberry Pi), with `SHA256SUMS.txt` and torrents.
 
-[Unreleased]: https://github.com/Londopy/hamzip/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Londopy/hamzip/compare/v0.2.0...HEAD
 [0.1.0]: https://github.com/Londopy/hamzip/releases/tag/v0.1.0
+[0.2.0]: https://github.com/Londopy/hamzip/compare/v0.1.0...v0.2.0
