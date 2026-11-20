@@ -151,19 +151,28 @@ fn read_message(path: &Option<PathBuf>) -> Result<Vec<u8>, Error> {
 fn info(msg: &[u8], given: &Option<PathBuf>) -> Result<(), Error> {
     let mode = mode_of(msg)?;
     let framing = if mode == Mode::Model { 7 } else { 5 };
+    let name = format!("{mode:?}").to_lowercase();
+    if msg.len() < framing {
+        return Err(Error::BadMessage(format!(
+            "{} bytes is too short for a {name}-mode message, which has {framing} bytes of framing",
+            msg.len()
+        )));
+    }
     println!(
-        "format 1, {} mode, {} bytes ({framing} of them framing)",
-        format!("{mode:?}").to_lowercase(),
+        "format 1, {name} mode, {} bytes ({framing} of them framing)",
         msg.len()
     );
-    if mode == Mode::Model && msg.len() >= 3 {
+    if mode == Mode::Model {
         let id = format!("{:02x}{:02x}", msg[1], msg[2]);
-        match model_path(given).and_then(|p| Model::load(&p).map(|m| (p, m))) {
-            Ok((p, m)) if m.id() == [msg[1], msg[2]] => {
-                println!("coded with model {id}.., which is {}", p.display())
-            }
-            Ok((p, _)) => println!("coded with model {id}.., not {}", p.display()),
-            Err(_) => println!("coded with model {id}..; no model here to compare"),
+        let Ok(path) = model_path(given) else {
+            println!("coded with model {id}..; no model here to compare");
+            return Ok(());
+        };
+        let m = Model::load(&path)?;
+        if m.id() == [msg[1], msg[2]] {
+            println!("coded with model {id}.., which is {}", path.display());
+        } else {
+            println!("coded with model {id}.., not {}", path.display());
         }
     }
     Ok(())
@@ -273,9 +282,19 @@ fn run(cli: &Cli) -> Result<(), Error> {
         } => {
             let m = load(&cli.model)?;
             let tok = Tokenizer::new(&m);
-            let msg = compress(Some(&m), Some(&tok), &read_input(input)?);
+            let plain = read_input(input)?;
+            let msg = compress(Some(&m), Some(&tok), &plain);
             if *text {
-                write_output(output, format!("{}\n", armor::to_text(&msg)).as_bytes())
+                let line = armor::to_text(&msg);
+                let chars = String::from_utf8_lossy(&plain).chars().count();
+                if line.len() >= chars {
+                    eprintln!(
+                        "note: the hz: line ({} characters) is no shorter than the message ({chars}); \
+                         on a text mode, sending the message as is costs less",
+                        line.len()
+                    );
+                }
+                write_output(output, format!("{line}\n").as_bytes())
             } else {
                 write_output(output, &msg)
             }

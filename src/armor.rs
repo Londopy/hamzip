@@ -1,5 +1,6 @@
-//! Text form of a message for modes that only carry text (JS8Call, fldigi, a
-//! Winlink message body): `hz:` followed by standard base64 (RFC 4648).
+//! Text form of a message for modes that only carry text (fldigi keyboard
+//! modes, a Winlink message body): `hz:` followed by standard base64 (RFC 4648).
+//! The mode has to pass upper and lower case, digits, `+`, `/`, `=` and `:`.
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 pub const PREFIX: &str = "hz:";
@@ -24,12 +25,35 @@ pub fn to_text(msg: &[u8]) -> String {
     out
 }
 
-/// The binary message inside `input` if it is in text form, ignoring
-/// surrounding whitespace and line breaks a text mode may have added.
+/// The binary message inside `input` if it is in text form: the first line
+/// that starts with `hz:` (any case), plus the lines after it that are only
+/// base64, which is how a text mode wraps a long one. None means `input` is
+/// a binary message, which always starts with its header byte 0x10-0x1F.
 pub fn from_text(input: &[u8]) -> Option<Result<Vec<u8>, String>> {
-    let s = std::str::from_utf8(input).ok()?.trim();
-    let body = s.strip_prefix(PREFIX)?;
-    let chars: Vec<u8> = body.bytes().filter(|c| !c.is_ascii_whitespace()).collect();
+    if input.first().is_some_and(|&b| b >> 4 == 1) {
+        return None;
+    }
+    if input.starts_with(&[0xFF, 0xFE]) || input.starts_with(&[0xFE, 0xFF]) {
+        return Some(Err("this is UTF-16 text; save it as UTF-8".into()));
+    }
+    let Ok(s) = std::str::from_utf8(input) else {
+        return Some(Err(
+            "not a hamzip message (neither binary nor hz: text)".into()
+        ));
+    };
+    let mut lines = s.trim_start_matches('\u{feff}').lines().map(str::trim);
+    let Some(first) = lines.find(|l| l.get(..3).is_some_and(|p| p.eq_ignore_ascii_case(PREFIX)))
+    else {
+        return Some(Err("no line starting with hz: found".into()));
+    };
+    let mut chars: Vec<u8> = first[3..]
+        .bytes()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let is_b64 = |l: &&str| !l.is_empty() && l.bytes().all(|c| ALPHABET.contains(&c) || c == b'=');
+    for l in lines.take_while(is_b64) {
+        chars.extend(l.bytes());
+    }
     Some(decode(&chars))
 }
 
@@ -103,7 +127,36 @@ mod tests {
     #[test]
     fn binary_messages_are_not_mistaken_for_text() {
         assert!(from_text(&[0x10, b'h', b'z', b':']).is_none());
-        assert!(from_text(b"plain text").is_none());
+        // a raw-mode message carries its text as is, hz: lines included
+        assert!(from_text(b"\x12note\nhz:Zm9v\nxxxx").is_none());
+    }
+
+    #[test]
+    fn finds_the_line_in_what_a_text_mode_hands_over() {
+        let foobar = b"foobar".to_vec();
+        for input in [
+            "\u{feff}hz:Zm9vYmFy\r\n".as_bytes(),
+            b"73 de K9XYZ\nHZ:Zm9v\nYmFy\n\nK9XYZ SK",
+            b"  hz:Zm9vYmFy  ",
+        ] {
+            assert_eq!(from_text(input).unwrap().unwrap(), foobar, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn other_text_gets_a_reason_not_a_format_error() {
+        assert!(from_text(b"\xff\xfeh\0z\0")
+            .unwrap()
+            .unwrap_err()
+            .contains("UTF-16"));
+        assert!(from_text(b"plain text")
+            .unwrap()
+            .unwrap_err()
+            .contains("no line"));
+        assert!(from_text(b"\xc3\x28")
+            .unwrap()
+            .unwrap_err()
+            .contains("not a hamzip message"));
     }
 
     #[test]
