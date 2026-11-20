@@ -1,6 +1,7 @@
 //! Byte-level BPE encoder matching SmolLM2's tokenizer: digits split one at a
-//! time, then the GPT-2 pre-tokenizer pattern, then merges by rank. Decoding
-//! never needs this; a different split still decodes, it just compresses worse.
+//! time, then the GPT-2 pre-tokenizer pattern, then merges by rank. A message
+//! split differently still decodes, it just compresses worse; the shared
+//! context's ids are the exception, and a test in lib.rs pins them.
 
 use std::collections::HashMap;
 

@@ -43,7 +43,7 @@ There is no padding and nothing follows the last section. Readers look sections 
 
 Special tokens have zero-length bytes. The encoder never emits one except `eos_id`, which ends every message.
 
-Decoding needs only the token bytes. The merges and the pre-tokenizer (digits split one at a time, then the GPT-2 pattern) are for the encoder. An encoder that splits text differently still produces a valid stream that any decoder reads back exactly; it just compresses a little worse.
+Decoding needs only the token bytes, plus the ids of the shared context, which [wire-format.md](wire-format.md) lists. The merges and the pre-tokenizer (digits split one at a time, then the GPT-2 pattern) are for the encoder, and for turning the shared context into ids. A message's own text can be split differently and still decode exactly, just a little less compactly; the context ids, by contrast, must match the listed ones, or no message decodes.
 
 ### Weights
 

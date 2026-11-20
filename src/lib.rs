@@ -16,7 +16,7 @@ pub use tokenizer::Tokenizer;
 
 const FORMAT: u8 = 1;
 /// Text both stations put in front of every model-coded message. It costs
-/// nothing on air and gives the model a start, which helps short messages most.
+/// nothing on air and gives the model a start, saving about 1% on average.
 pub const CONTEXT: &str = "Amateur radio message sent over Winlink:\n\n";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const MAX_MESSAGE: u64 = 1 << 20;
@@ -324,6 +324,16 @@ mod tests {
         // docs/wire-format.md lists these; Hugging Face's tokenizer gives the same
         let want = [8112, 17919, 5171, 3714, 2362, 690, 16641, 8371, 42, 1116];
         assert_eq!(test_model().context, want);
+    }
+
+    #[test]
+    fn a_message_exactly_at_the_token_limit_round_trips() {
+        let m = test_model();
+        let tok = Tokenizer::new(m);
+        let base = tok.encode(std::str::from_utf8(NET).unwrap()).unwrap();
+        let tokens: Vec<u32> = base.iter().copied().cycle().take(max_tokens(m)).collect();
+        let coded = encode_tokens(m, &tokens);
+        assert_eq!(decode_tokens(m, &coded).unwrap(), tokens);
     }
 
     #[test]

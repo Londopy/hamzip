@@ -22,9 +22,9 @@ A decoder that gets a model-mode message whose model id differs from its own mod
 
 The text is UTF-8. It is split into tokens with the model's byte-level BPE (see [model-format.md](model-format.md)), and the end-of-text token is appended. A message is limited to `max_ctx - 11` tokens, 2037 for SmolLM2-135M or roughly 7000 characters; longer text goes out as zstd or raw.
 
-Before any message, both sides run the model over a fixed start: the end-of-text token as a start marker, then the shared context `"Amateur radio message sent over Winlink:\n\n"` in the model's tokens. For SmolLM2-135M those are `8112, 17919, 5171, 3714, 2362, 690, 16641, 8371, 42, 1116`. The context is never sent; it gives the model somewhere to start, which saves about 5% on messages under 200 characters.
+Before any message, both sides prime the model with a fixed start: the end-of-text token, then the shared context `"Amateur radio message sent over Winlink:\n\n"` in the model's tokens. For SmolLM2-135M those are `8112, 17919, 5171, 3714, 2362, 690, 16641, 8371, 42, 1116`, and a decoder must use exactly these ids. The context is never sent; it gives the model somewhere to start, which saves about 1% on average.
 
-Coding then runs the model once per token. The first input is the last context token, and each later input is the previous message token. After each step the engine ([engine.md](engine.md)) turns the logits into integer frequencies `f[t] >= 1` with a total of at most 2^24, and the range coder codes the actual next token with them. The decoder runs the same steps, so it sees the same frequencies, and stops at the end-of-text token.
+Exactly: run the model over the end-of-text token and the first nine context tokens (positions 0 to 9), discarding their logits. The tenth context token is the first coding input, at position 10, and its logits code the message's first token. Each later input is the previous message token. After each step the engine ([engine.md](engine.md)) turns the logits into integer frequencies `f[t] >= 1` with a total of at most 2^24, and the range coder codes the actual next token with them. The decoder runs the same steps, so it sees the same frequencies, and stops at the end-of-text token.
 
 ## Range coder
 
