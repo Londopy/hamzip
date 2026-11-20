@@ -14,11 +14,6 @@ use sha2::{Digest, Sha256};
 use hamzip::Error;
 
 const REPO: &str = "Londopy/hamzip";
-pub const MODEL_FILE: &str = "smollm2-135m.hzm";
-const MODEL_SHA256: &str = "4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919";
-// the model lives on its own release so app releases don't re-upload 137 MB each time
-const MODEL_URL: &str =
-    "https://github.com/Londopy/hamzip/releases/download/model-smollm2-135m/smollm2-135m.hzm";
 
 #[derive(Deserialize)]
 struct Release {
@@ -258,9 +253,18 @@ pub fn start_notice(data_dir: &Path) -> Option<std::sync::mpsc::Receiver<String>
     Some(rx)
 }
 
-/// `hamzip model download`: fetch the shared model and check its SHA-256.
-pub fn download_model(dir: &Path) -> Result<PathBuf, Error> {
-    download_checked(MODEL_URL, MODEL_SHA256, &dir.join(MODEL_FILE))
+/// `hamzip model download`: fetch a published model and check its SHA-256.
+/// Each model lives on its own release, so app releases don't re-upload it.
+pub fn download_model(name: &str, dir: &Path) -> Result<PathBuf, Error> {
+    let sha = hamzip::model_sha256(name).ok_or_else(|| {
+        let names: Vec<_> = hamzip::MODELS.iter().map(|(n, _)| *n).collect();
+        Error::Io(format!(
+            "no published model named {name}; there are {}",
+            names.join(", ")
+        ))
+    })?;
+    let url = format!("https://github.com/{REPO}/releases/download/model-{name}/{name}.hzm");
+    download_checked(&url, sha, &dir.join(format!("{name}.hzm")))
 }
 
 /// Streams `url` to `dest`, which only appears once its SHA-256 matches.

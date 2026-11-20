@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
     about = "Compress short text messages for slow radio links with a shared language model"
 )]
 struct Cli {
-    /// Model file both stations share. Default: smollm2-135m.hzm next to hamzip, then in
-    /// the data folder (`hamzip model download` puts it there)
+    /// Model both stations share: a published model's name (see `hamzip model list`) or the
+    /// path to a model file. Default: smollm2-135m for encoding; decoding uses whichever
+    /// installed model the message names
     #[arg(short, long, env = "HAMZIP_MODEL", global = true)]
     model: Option<PathBuf>,
     #[command(subcommand)]
@@ -67,13 +68,18 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ModelCmd {
-    /// Download smollm2-135m.hzm (137 MB) and check its SHA-256
+    /// Download a published model and check its SHA-256
     Download {
+        /// smollm2-135m (137 MB, the default) or smollm2-360m (365 MB, about 9% smaller
+        /// messages, half the decode speed)
+        name: Option<String>,
         /// Folder to save it in (default: the data folder)
         #[arg(long)]
         to: Option<PathBuf>,
     },
-    /// Print the model file hamzip would use
+    /// List the published models and where each is installed
+    List,
+    /// Print the model file hamzip would encode with
     Path,
 }
 
@@ -96,25 +102,47 @@ fn data_dir() -> PathBuf {
     base.unwrap_or_else(|| PathBuf::from(".")).join("hamzip")
 }
 
-fn model_path(given: &Option<PathBuf>) -> Result<PathBuf, Error> {
-    if let Some(p) = given {
-        return Ok(p.clone());
-    }
+/// An installed published model: next to hamzip, then in the data folder.
+fn find_installed(name: &str) -> Option<PathBuf> {
     exe_dir()
         .into_iter()
         .chain([data_dir()])
-        .map(|d| d.join(upgrade::MODEL_FILE))
+        .map(|d| d.join(format!("{name}.hzm")))
         .find(|p| p.is_file())
-        .ok_or_else(|| {
-            Error::Io(
-                "no model found: run `hamzip model download`, pass --model, or set HAMZIP_MODEL"
-                    .into(),
-            )
-        })
+}
+
+/// `--model` is a path or a published model's name; without it, the default model.
+fn model_path(given: &Option<PathBuf>) -> Result<PathBuf, Error> {
+    let name = match given {
+        Some(p) => match p.to_str().filter(|s| hamzip::model_sha256(s).is_some()) {
+            Some(name) => name.to_string(),
+            None => return Ok(p.clone()),
+        },
+        None => hamzip::MODELS[0].0.to_string(),
+    };
+    find_installed(&name).ok_or_else(|| {
+        Error::Io(format!(
+            "model {name} is not installed: run `hamzip model download {name}`, or pass --model \
+             with the path to a model file"
+        ))
+    })
 }
 
 fn load(given: &Option<PathBuf>) -> Result<Model, Error> {
-    Model::load(&model_path(given)?)
+    let path = model_path(given)?;
+    Model::load(&path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))
+}
+
+/// The model to decode a model-mode `msg` with: the one asked for, or else the
+/// published model the message names, so a station can keep both installed.
+fn model_for(given: &Option<PathBuf>, msg: &[u8]) -> Result<Model, Error> {
+    match msg
+        .get(1..3)
+        .and_then(|id| hamzip::model_name([id[0], id[1]]))
+    {
+        Some(name) if given.is_none() => load(&Some(PathBuf::from(name))),
+        _ => load(given),
+    }
 }
 
 fn read_input(path: &Option<PathBuf>) -> Result<Vec<u8>, Error> {
@@ -169,16 +197,25 @@ fn info(msg: &[u8], given: &Option<PathBuf>) -> Result<(), Error> {
         msg.len()
     );
     if mode == Mode::Model {
-        let id = format!("{:02x}{:02x}", msg[1], msg[2]);
-        let Ok(path) = model_path(given) else {
-            println!("coded with model {id}..; no model here to compare");
-            return Ok(());
-        };
-        let m = Model::load(&path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
-        if m.id() == [msg[1], msg[2]] {
-            println!("coded with model {id}.., which is {}", path.display());
-        } else {
-            println!("coded with model {id}.., not {}", path.display());
+        let id = [msg[1], msg[2]];
+        println!("coded with model {}", hamzip::describe_model(id));
+        match (hamzip::model_name(id), given) {
+            (Some(name), None) => match find_installed(name) {
+                Some(p) => println!("installed here: {}", p.display()),
+                None => println!("not installed here; get it with `hamzip model download {name}`"),
+            },
+            (_, Some(_)) => {
+                let path = model_path(given)?;
+                let m = Model::load(&path)
+                    .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+                let verdict = if m.id() == id {
+                    "matches"
+                } else {
+                    "does not match"
+                };
+                println!("{verdict} {}", path.display());
+            }
+            (None, None) => {}
         }
     }
     Ok(())
@@ -310,7 +347,7 @@ fn run(cli: &Cli) -> Result<(), Error> {
             let msg = read_message(input)?;
             // zstd and raw messages decode without loading the model
             let m = match mode_of(&msg)? {
-                Mode::Model => Some(load(&cli.model)?),
+                Mode::Model => Some(model_for(&cli.model, &msg)?),
                 _ => None,
             };
             write_output(output, &decompress(m.as_ref(), &msg)?)
@@ -318,10 +355,23 @@ fn run(cli: &Cli) -> Result<(), Error> {
         Cmd::Info { input } => info(&read_message(input)?, &cli.model),
         Cmd::Bench { dir, encode_only } => bench(&load(&cli.model)?, dir, *encode_only),
         Cmd::Model {
-            cmd: ModelCmd::Download { to },
+            cmd: ModelCmd::Download { name, to },
         } => {
-            let path = upgrade::download_model(&to.clone().unwrap_or_else(data_dir))?;
+            let name = name.as_deref().unwrap_or(hamzip::MODELS[0].0);
+            let path = upgrade::download_model(name, &to.clone().unwrap_or_else(data_dir))?;
             println!("saved {}", path.display());
+            Ok(())
+        }
+        Cmd::Model {
+            cmd: ModelCmd::List,
+        } => {
+            for (i, (name, _)) in hamzip::MODELS.iter().enumerate() {
+                let default = if i == 0 { " (default)" } else { "" };
+                match find_installed(name) {
+                    Some(p) => println!("{name}{default}: {}", p.display()),
+                    None => println!("{name}{default}: not installed"),
+                }
+            }
             Ok(())
         }
         Cmd::Model {

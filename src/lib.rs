@@ -21,6 +21,46 @@ pub const CONTEXT: &str = "Amateur radio message sent over Winlink:\n\n";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const MAX_MESSAGE: u64 = 1 << 20;
 
+/// The published models, by name and the SHA-256 of the model file. The first is
+/// the default. A message's two model id bytes are the start of that hash.
+pub const MODELS: &[(&str, &str)] = &[
+    (
+        "smollm2-135m",
+        "4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919",
+    ),
+    (
+        "smollm2-360m",
+        "6f5678c020f9979fe9628fa379c4ad1d37e36f2cdfb5f1ed714b13e4ecfd6983",
+    ),
+];
+
+fn id_of(sha256_hex: &str) -> [u8; 2] {
+    let byte = |i: usize| u8::from_str_radix(&sha256_hex[i..i + 2], 16).unwrap();
+    [byte(0), byte(2)]
+}
+
+/// The SHA-256 of the published model with this name.
+pub fn model_sha256(name: &str) -> Option<&'static str> {
+    MODELS.iter().find(|(n, _)| *n == name).map(|(_, sha)| *sha)
+}
+
+/// The name of the published model with this message id, if there is one.
+pub fn model_name(id: [u8; 2]) -> Option<&'static str> {
+    MODELS
+        .iter()
+        .find(|(_, sha)| id_of(sha) == id)
+        .map(|(name, _)| *name)
+}
+
+/// A model id as people should read it: its name when it is a published model.
+pub fn describe_model(id: [u8; 2]) -> String {
+    let hex = format!("{:02x}{:02x}", id[0], id[1]);
+    match model_name(id) {
+        Some(name) => format!("{name} ({hex}..)"),
+        None => format!("{hex}.., not a published model"),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Model = 0,
@@ -45,11 +85,18 @@ impl fmt::Display for Error {
             Error::BadModel(e) => write!(f, "bad model file: {e}"),
             Error::BadMessage(e) => write!(f, "bad message: {e}"),
             Error::NeedModel => write!(f, "this message was coded with a model; pass --model"),
-            Error::WrongModel { sender, ours } => write!(
-                f,
-                "message was coded with model {:02x}{:02x}.., but the loaded model is {:02x}{:02x}..",
-                sender[0], sender[1], ours[0], ours[1]
-            ),
+            Error::WrongModel { sender, ours } => {
+                write!(
+                    f,
+                    "this message was coded with model {}, but the loaded model is {}",
+                    describe_model(*sender),
+                    describe_model(*ours)
+                )?;
+                if let Some(name) = model_name(*sender) {
+                    write!(f, "; get it with `hamzip model download {name}`")?;
+                }
+                Ok(())
+            }
             Error::Checksum => write!(f, "checksum mismatch: the message is corrupt"),
         }
     }
@@ -403,5 +450,25 @@ mod tests {
         msg[1] = m.id()[0] ^ 0xFF;
         let err = decompress(Some(m), &msg).unwrap_err();
         assert!(matches!(err, Error::WrongModel { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_message_for_the_other_published_model_names_it() {
+        let m = test_model();
+        let other = id_of(MODELS[1].1);
+        let msg = frame(Mode::Model, &[other[0], other[1], 1, 2, 3], b"x");
+        let err = decompress(Some(m), &msg).unwrap_err().to_string();
+        assert!(
+            err.contains("smollm2-360m (6f56..)") && err.contains("smollm2-135m (4f3b..)"),
+            "{err}"
+        );
+        assert!(err.contains("hamzip model download smollm2-360m"), "{err}");
+    }
+
+    #[test]
+    fn published_models_have_distinct_ids_and_the_default_is_shipped() {
+        let ids: std::collections::HashSet<_> = MODELS.iter().map(|(_, s)| id_of(s)).collect();
+        assert_eq!(ids.len(), MODELS.len());
+        assert_eq!(model_name(test_model().id()), Some(MODELS[0].0));
     }
 }
