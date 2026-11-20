@@ -23,11 +23,16 @@ These are for model `smollm2-135m.hzm` (SHA-256 `4f3b006a...c919`) and message f
 | Machine | Dot product | Tests and golden vectors | 100 messages | 2000 messages |
 |---|---|---|---|---|
 | Windows 11, x86-64 (Core Ultra 9), the reference | AVX2 | pass | round trip | round trip |
+| GitHub `ubuntu-24.04-arm`, native aarch64 | plain Rust (NEON) | pass | round trip, same digest | round trip, same digest |
+| GitHub `ubuntu-24.04`, x86-64 Linux | AVX2 | pass | round trip, same digest | encoded, same digest |
+| GitHub `ubuntu-24.04`, armv7 32-bit under QEMU | plain Rust | pass, upgrade tests skipped | encoded, same digest | not run |
 
-The rows for other machines are filled in from the Determinism workflow's runs.
+The aarch64 run is the one that matters most for a Raspberry Pi: it decodes all 2000 messages on real ARM hardware, from encodings bit-identical to the x86 reference, so a Pi decodes what a Windows PC sends. It also ran faster than expected, about 190 tokens a second encoding and 130 decoding on a 4-core runner. That is a server-class ARM core, though, not a Pi. The armv7 job runs under emulation at about 3 tokens a second, which is why it only encodes the 100-message set; its golden-vector test decodes under QEMU. The upgrade tests start a copy of their own binary outside cargo's QEMU runner, so they can't run there; they test downloads, not the arithmetic.
+
+Messages from the earlier local runs under Docker's QEMU (aarch64 and armv7, before the shared context was added) also matched x86 exactly.
 
 ## Not checked yet
 
-- Real Raspberry Pi hardware, including speed.
+- A real Raspberry Pi, including its speed. The native aarch64 runner shows the arithmetic agrees on ARM; a Pi's slower cores and memory will decode more slowly.
 - The Windows x86 (32-bit) and arm64 builds.
 - A message sent over the air, for example over VARA FM, timed with and without hamzip.
