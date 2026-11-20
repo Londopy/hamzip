@@ -117,10 +117,13 @@ def bpc(bits, test):
 def row(label, bits, test, header_bytes):
     per_msg = [b / len(m["text"]) for b, m in zip(bits, test)]
     with_hdr = [(b + header_bytes * 8) / len(m["text"]) for b, m in zip(bits, test)]
-    short = [b / len(m["text"]) for b, m in zip(bits, test) if 100 <= len(m["text"]) <= 500]
+    in_range = [(b, m) for b, m in zip(bits, test) if 100 <= len(m["text"]) <= 500]
+    short = [b / len(m["text"]) for b, m in in_range]
+    short_hdr = [(b + header_bytes * 8) / len(m["text"]) for b, m in in_range]
     return (
         f"| {label} | {bpc(bits, test):.2f} | {statistics.median(per_msg):.2f} "
-        f"| {statistics.median(short):.2f} | {statistics.median(with_hdr):.2f} |"
+        f"| {statistics.median(short):.2f} | {statistics.median(short_hdr):.2f} "
+        f"| {statistics.median(with_hdr):.2f} |"
     )
 
 
@@ -158,8 +161,11 @@ def main():
     print(f"corpus: {len(msgs)} messages, {len(train)} train / {len(test)} test")
     print(f"test lengths: min {min(lengths)}, median {statistics.median(lengths)}, max {max(lengths)}")
     print(f"header charged: {args.header} bytes (baselines get the same charge)\n")
-    print("| method | bpc (total) | bpc (median msg) | median, 100-500 chars | median incl. header |")
-    print("|---|---|---|---|---|")
+    print(
+        "| method | bpc (total) | bpc (median msg) | median, 100-500 chars "
+        "| same, incl. header | median incl. header |"
+    )
+    print("|---|---|---|---|---|---|")
     for label, bits in baselines(train, test).items():
         print(row(label, bits, test, args.header))
     speeds = []

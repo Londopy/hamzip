@@ -9,6 +9,9 @@ Published files:
 | File | Source | SHA-256 |
 |---|---|---|
 | `smollm2-135m.hzm` | HuggingFaceTB/SmolLM2-135M (Apache-2.0) | `4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919` |
+| `smollm2-360m.hzm` | HuggingFaceTB/SmolLM2-360M (Apache-2.0) | `6f5678c020f9979fe9628fa379c4ad1d37e36f2cdfb5f1ed714b13e4ecfd6983` |
+
+Each one is published on its own release, tagged `model-<name>`, and listed in `MODELS` in `src/lib.rs`. Both use the same vocabulary, so the shared context has the same ids for both.
 
 ## Layout
 

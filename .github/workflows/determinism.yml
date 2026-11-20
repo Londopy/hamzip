@@ -31,6 +31,7 @@ env:
   # keep in step with docs/determinism.md
   DIGEST_100: 43ff66700a0f95a8aedbffe44022f964d01a8555d99ecffbefd885dbebefef7c
   DIGEST_2000: c945be8d4212896dd07f688dd80cd7115e6b344c2111db4430e47d7a50a1872b
+  DIGEST_100_360M: 9b534c26aa5f97f1c037c229ffd7729cf047d1f3cd5acb30c363b5c8355f072e
 
 jobs:
   native:
@@ -79,6 +80,22 @@ jobs:
           python3 tools/mix.py mix --count 2000
           ./target/release/hamzip -m models/smollm2-135m.hzm bench mix ${{ matrix.encode_only }} | tail -3 | tee bench2000.txt
           grep -qx "digest $DIGEST_2000" bench2000.txt
+
+      - name: Cache the larger model
+        id: model360
+        uses: actions/cache@v6
+        with:
+          path: models360
+          key: model-${{ runner.os }}-6f5678c020f9979fe9628fa379c4ad1d37e36f2cdfb5f1ed714b13e4ecfd6983
+
+      - name: Download the larger model
+        if: steps.model360.outputs.cache-hit != 'true'
+        run: ./target/release/hamzip model download smollm2-360m --to models360
+
+      - name: 100 messages with smollm2-360m
+        run: |
+          ./target/release/hamzip -m models360/smollm2-360m.hzm bench mix100 ${{ matrix.encode_only }} | tail -3 | tee bench360.txt
+          grep -qx "digest $DIGEST_100_360M" bench360.txt
 
   armv7:
     # 32-bit Raspberry Pi OS. There is no armv7 runner, so this cross-compiles and runs
