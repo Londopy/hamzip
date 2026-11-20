@@ -27,8 +27,9 @@ pub fn to_text(msg: &[u8]) -> String {
 
 /// The binary message inside `input` if it is in text form: the first line
 /// that starts with `hz:` (any case), plus the lines after it that are only
-/// base64, which is how a text mode wraps a long one. None means `input` is
-/// a binary message, which always starts with its header byte 0x10-0x1F.
+/// base64, which is how a text mode wraps a long one. None means there is no
+/// such line, so `input` should be a binary message; those always start with
+/// their header byte 0x10-0x1F and are never searched for one.
 pub fn from_text(input: &[u8]) -> Option<Result<Vec<u8>, String>> {
     if input.first().is_some_and(|&b| b >> 4 == 1) {
         return None;
@@ -36,24 +37,31 @@ pub fn from_text(input: &[u8]) -> Option<Result<Vec<u8>, String>> {
     if input.starts_with(&[0xFF, 0xFE]) || input.starts_with(&[0xFE, 0xFF]) {
         return Some(Err("this is UTF-16 text; save it as UTF-8".into()));
     }
-    let Ok(s) = std::str::from_utf8(input) else {
-        return Some(Err(
-            "not a hamzip message (neither binary nor hz: text)".into()
-        ));
-    };
+    // TNC and serial captures often end lines with a bare CR
+    let s = std::str::from_utf8(input)
+        .ok()?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
     let mut lines = s.trim_start_matches('\u{feff}').lines().map(str::trim);
-    let Some(first) = lines.find(|l| l.get(..3).is_some_and(|p| p.eq_ignore_ascii_case(PREFIX)))
-    else {
-        return Some(Err("no line starting with hz: found".into()));
-    };
+    let first = lines.find(|l| l.get(..3).is_some_and(|p| p.eq_ignore_ascii_case(PREFIX)))?;
     let mut chars: Vec<u8> = first[3..]
         .bytes()
         .filter(|c| !c.is_ascii_whitespace())
         .collect();
     let is_b64 = |l: &&str| !l.is_empty() && l.bytes().all(|c| ALPHABET.contains(&c) || c == b'=');
+    // a sign-off such as "73" or a callsign under the line is base64 too, so keep only
+    // whole 4-character groups and stop at padding, which always ends the data
+    let mut end = chars.len();
     for l in lines.take_while(is_b64) {
+        if chars.len().is_multiple_of(4) && chars.ends_with(b"=") {
+            break;
+        }
         chars.extend(l.bytes());
+        if chars.len().is_multiple_of(4) {
+            end = chars.len();
+        }
     }
+    chars.truncate(end);
     Some(decode(&chars))
 }
 
@@ -144,19 +152,33 @@ mod tests {
     }
 
     #[test]
-    fn other_text_gets_a_reason_not_a_format_error() {
+    fn a_sign_off_under_the_line_is_not_part_of_it() {
+        for (input, want) in [
+            ("hz:Zm9vYmFy\n73\n", "foobar"),
+            ("hz:Zm9vYmFy\n\nK9XYZ\n", "foobar"),
+            ("hz:Zm9v\nYmFy\nSK\n", "foobar"),
+            ("hz:Zm9vYg==\nJohn\n", "foob"),
+            ("hz:Zm9vYg=\n=\n73", "foob"),
+            ("73 de K9XYZ\rhz:Zm9v\rYmFy\r", "foobar"),
+        ] {
+            assert_eq!(
+                from_text(input.as_bytes()).unwrap().unwrap(),
+                want.as_bytes(),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_input_with_an_hz_line_counts_as_text() {
         assert!(from_text(b"\xff\xfeh\0z\0")
             .unwrap()
             .unwrap_err()
             .contains("UTF-16"));
-        assert!(from_text(b"plain text")
-            .unwrap()
-            .unwrap_err()
-            .contains("no line"));
-        assert!(from_text(b"\xc3\x28")
-            .unwrap()
-            .unwrap_err()
-            .contains("not a hamzip message"));
+        // these go on to be read as binary, where the CLI explains what they are
+        assert!(from_text(b"plain text").is_none());
+        assert!(from_text(b"\xc3\x28").is_none());
+        assert!(from_text(b"").is_none());
     }
 
     #[test]

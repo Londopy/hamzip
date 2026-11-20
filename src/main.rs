@@ -144,6 +144,12 @@ fn read_message(path: &Option<PathBuf>) -> Result<Vec<u8>, Error> {
     let raw = read_input(path)?;
     match armor::from_text(&raw) {
         Some(msg) => msg.map_err(|e| Error::BadMessage(format!("hz: text: {e}"))),
+        None if raw.is_empty() => Err(Error::BadMessage("the input is empty".into())),
+        None if raw[0] >> 4 != 1 => Err(Error::BadMessage(format!(
+            "not a hamzip message: there is no hz: line, and read as binary it would be \
+             message format {}, which this hamzip doesn't know",
+            raw[0] >> 4
+        ))),
         None => Ok(raw),
     }
 }
@@ -168,7 +174,7 @@ fn info(msg: &[u8], given: &Option<PathBuf>) -> Result<(), Error> {
             println!("coded with model {id}..; no model here to compare");
             return Ok(());
         };
-        let m = Model::load(&path)?;
+        let m = Model::load(&path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
         if m.id() == [msg[1], msg[2]] {
             println!("coded with model {id}.., which is {}", path.display());
         } else {
@@ -286,12 +292,13 @@ fn run(cli: &Cli) -> Result<(), Error> {
             let msg = compress(Some(&m), Some(&tok), &plain);
             if *text {
                 let line = armor::to_text(&msg);
-                let chars = String::from_utf8_lossy(&plain).chars().count();
-                if line.len() >= chars {
+                // a text channel carries UTF-8, so bytes are what both cost
+                if line.len() >= plain.len() {
                     eprintln!(
-                        "note: the hz: line ({} characters) is no shorter than the message ({chars}); \
+                        "note: the hz: line ({} bytes) is no shorter than the message ({}); \
                          on a text mode, sending the message as is costs less",
-                        line.len()
+                        line.len(),
+                        plain.len()
                     );
                 }
                 write_output(output, format!("{line}\n").as_bytes())
