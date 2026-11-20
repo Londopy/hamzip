@@ -60,7 +60,7 @@ jobs:
         with:
           ref: ${{ steps.tag.outputs.tag }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -297,7 +297,7 @@ jobs:
           Copy-Item installer\install.ps1, installer\install.cmd dist\
           Get-ChildItem dist | Format-Table Name, Length
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
