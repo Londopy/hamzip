@@ -74,6 +74,8 @@ pub struct Model {
     pub tok_bytes: Vec<u8>,
     pub merges: Vec<[u32; 3]>,
     pub sha256: [u8; 32],
+    /// `crate::CONTEXT` in this model's tokens, run before every message.
+    pub context: Vec<u32>,
 }
 
 struct Section<'a> {
@@ -289,7 +291,7 @@ impl Model {
         {
             return Err(bad("rope table entry above 1.0"));
         }
-        Ok(Model {
+        let mut m = Model {
             embed: s.linear("embed", cfg.vocab, d)?,
             layers,
             final_norm: s.gain("final_norm", d)?,
@@ -302,7 +304,13 @@ impl Model {
             merges: merges.as_chunks::<3>().0.to_vec(),
             sha256,
             cfg,
-        })
+            context: Vec::new(),
+        };
+        m.context = crate::Tokenizer::new(&m)
+            .encode(crate::CONTEXT)
+            .filter(|c| c.len() < m.cfg.max_ctx / 2)
+            .ok_or_else(|| bad("the vocabulary cannot spell the shared context"))?;
+        Ok(m)
     }
 
     pub fn token_bytes(&self, id: u32) -> &[u8] {

@@ -14,6 +14,9 @@ pub use model::Model;
 pub use tokenizer::Tokenizer;
 
 const FORMAT: u8 = 1;
+/// Text both stations put in front of every model-coded message. It costs
+/// nothing on air and gives the model a start, which helps short messages most.
+pub const CONTEXT: &str = "Amateur radio message sent over Winlink:\n\n";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const MAX_MESSAGE: u64 = 1 << 20;
 
@@ -85,9 +88,24 @@ pub fn encode_tokens(m: &Model, tokens: &[u32]) -> Vec<u8> {
     encode_in_blocks(m, tokens, 64)
 }
 
+/// Starts a session that has seen the start token and the shared context, and
+/// returns it with the last of those tokens, which predicts the message's first.
+fn primed(m: &Model) -> (engine::Session<'_>, u32) {
+    let mut s = engine::Session::new(m);
+    let prefix: Vec<u32> = std::iter::once(m.cfg.eos)
+        .chain(m.context.iter().copied())
+        .collect();
+    let (&last, rest) = prefix.split_last().unwrap();
+    if !rest.is_empty() {
+        s.steps(rest);
+    }
+    (s, last)
+}
+
 // the encoder knows every token up front, so it runs the model on blocks of them
 fn encode_in_blocks(m: &Model, tokens: &[u32], block: usize) -> Vec<u8> {
-    let inputs: Vec<u32> = std::iter::once(m.cfg.eos)
+    let (mut s, first) = primed(m);
+    let inputs: Vec<u32> = std::iter::once(first)
         .chain(tokens.iter().copied())
         .collect();
     let targets: Vec<u32> = tokens
@@ -95,7 +113,6 @@ fn encode_in_blocks(m: &Model, tokens: &[u32], block: usize) -> Vec<u8> {
         .copied()
         .chain(std::iter::once(m.cfg.eos))
         .collect();
-    let mut s = engine::Session::new(m);
     let mut enc = rangecoder::Encoder::new();
     for (ins, outs) in inputs.chunks(block).zip(targets.chunks(block)) {
         let cums: Vec<Vec<u32>> = s
@@ -112,9 +129,8 @@ fn encode_in_blocks(m: &Model, tokens: &[u32], block: usize) -> Vec<u8> {
 }
 
 pub fn decode_tokens(m: &Model, data: &[u8]) -> Result<Vec<u32>, Error> {
-    let mut s = engine::Session::new(m);
+    let (mut s, mut prev) = primed(m);
     let mut dec = rangecoder::Decoder::new(data);
-    let mut prev = m.cfg.eos;
     let mut out = Vec::new();
     loop {
         if s.pos() == m.cfg.max_ctx || dec.overrun() {
@@ -135,9 +151,10 @@ pub fn decode_tokens(m: &Model, data: &[u8]) -> Result<Vec<u32>, Error> {
     }
 }
 
-/// The longest token sequence the model can code: one position is the start token.
+/// The longest token sequence the model can code: the start token and the shared
+/// context take the first positions.
 pub fn max_tokens(m: &Model) -> usize {
-    m.cfg.max_ctx - 1
+    m.cfg.max_ctx - 1 - m.context.len()
 }
 
 fn zstd_body(text: &[u8]) -> Vec<u8> {
@@ -299,6 +316,13 @@ mod tests {
         let msg = compress(None, None, &text);
         assert_eq!(mode_of(&msg).unwrap(), Mode::Raw);
         assert_eq!(decompress(None, &msg).unwrap(), text);
+    }
+
+    #[test]
+    fn shared_context_has_the_published_token_ids() {
+        // docs/wire-format.md lists these; Hugging Face's tokenizer gives the same
+        let want = [8112, 17919, 5171, 3714, 2362, 690, 16641, 8371, 42, 1116];
+        assert_eq!(test_model().context, want);
     }
 
     #[test]
