@@ -116,11 +116,10 @@ jobs:
         if: steps.model.outputs.cache-hit != 'true'
         run: cargo run --release -- model download --to models
 
-      # the upgrade tests start a copy of the test binary themselves, outside cargo's
-      # QEMU runner, so they can't run here; they test downloads, not the arithmetic
+      # the CLI and upgrade tests start programs themselves, outside cargo's QEMU
+      # runner, so they can't run here; they don't test the arithmetic
       - name: Tests under QEMU, golden vectors included
-        run: |
-          cargo test --target armv7-unknown-linux-gnueabihf -- --skip upgrade::
+        run: cargo test --target armv7-unknown-linux-gnueabihf --lib --test golden
 
       - name: 100 messages under QEMU
         run: |

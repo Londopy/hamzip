@@ -76,7 +76,7 @@ hamzip decode message.hz -o message.txt
 hamzip info message.hz                      # mode, size and model, without decoding
 ```
 
-For a text-only mode, add `--text` and paste the line it prints; `decode` and `info` take the line (or a file holding it) the same way as a binary message, line breaks and all:
+For a text-only mode, add `--text` and paste the line it prints; `decode` and `info` take the line (or a whole received transcript holding it) the same way as a binary message, even if the mode wrapped it over several lines. Leave a blank line between it and your sign-off, since a callsign or "73" on the next line looks like more of the message:
 
 ```console
 $ hamzip encode letter.txt --text
