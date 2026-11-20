@@ -1,5 +1,6 @@
 //! Shared-model text compression for slow radio links. See docs/wire-format.md.
 
+pub mod armor;
 mod engine;
 mod model;
 mod rangecoder;

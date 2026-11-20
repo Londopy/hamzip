@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use hamzip::{compress, decompress, mode_of, Error, Mode, Model, Tokenizer};
+use hamzip::{armor, compress, decompress, mode_of, Error, Mode, Model, Tokenizer};
 use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
@@ -30,15 +30,25 @@ enum Cmd {
         input: Option<PathBuf>,
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Write the message as `hz:` text (base64) for modes that only carry text
+        #[arg(long)]
+        text: bool,
     },
-    /// Turn a binary message back into text
+    /// Turn a message, binary or `hz:` text, back into text
     Decode {
         input: Option<PathBuf>,
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Show how a message was coded, without decoding it
+    Info { input: Option<PathBuf> },
     /// Round-trip every file in a directory and report size, speed and a digest of the output
-    Bench { dir: PathBuf },
+    Bench {
+        dir: PathBuf,
+        /// Only encode, for a quick digest on a slow machine
+        #[arg(long)]
+        encode_only: bool,
+    },
     /// Get the shared model file
     Model {
         #[command(subcommand)]
@@ -129,7 +139,37 @@ fn write_output(path: &Option<PathBuf>, data: &[u8]) -> Result<(), Error> {
     }
 }
 
-fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
+/// A message from a file or stdin, binary or in `hz:` text form.
+fn read_message(path: &Option<PathBuf>) -> Result<Vec<u8>, Error> {
+    let raw = read_input(path)?;
+    match armor::from_text(&raw) {
+        Some(msg) => msg.map_err(|e| Error::BadMessage(format!("hz: text: {e}"))),
+        None => Ok(raw),
+    }
+}
+
+fn info(msg: &[u8], given: &Option<PathBuf>) -> Result<(), Error> {
+    let mode = mode_of(msg)?;
+    let framing = if mode == Mode::Model { 7 } else { 5 };
+    println!(
+        "format 1, {} mode, {} bytes ({framing} of them framing)",
+        format!("{mode:?}").to_lowercase(),
+        msg.len()
+    );
+    if mode == Mode::Model && msg.len() >= 3 {
+        let id = format!("{:02x}{:02x}", msg[1], msg[2]);
+        match model_path(given).and_then(|p| Model::load(&p).map(|m| (p, m))) {
+            Ok((p, m)) if m.id() == [msg[1], msg[2]] => {
+                println!("coded with model {id}.., which is {}", p.display())
+            }
+            Ok((p, _)) => println!("coded with model {id}.., not {}", p.display()),
+            Err(_) => println!("coded with model {id}..; no model here to compare"),
+        }
+    }
+    Ok(())
+}
+
+fn bench(m: &Model, dir: &Path, encode_only: bool) -> Result<(), Error> {
     let tok = Tokenizer::new(m);
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?
@@ -160,14 +200,13 @@ fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
         let t0 = Instant::now();
         let msg = compress(Some(m), Some(&tok), &text);
         let t1 = Instant::now();
-        let back = decompress(Some(m), &msg)?;
-        let t2 = Instant::now();
-        if back != text {
+        if !encode_only && decompress(Some(m), &msg)? != text {
             return Err(Error::BadMessage(format!(
                 "{} did not round-trip",
                 f.display()
             )));
         }
+        let t2 = Instant::now();
         let mode = mode_of(&msg)?;
         // zstd output depends on the zstd version, which the format doesn't pin
         if mode == Mode::Model {
@@ -196,15 +235,24 @@ fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
         per_msg[mid]
     };
     println!(
-        "\n{} messages round-tripped. {:.3} bpc overall, {median:.3} median, headers included",
+        "\n{} messages {}. {:.3} bpc overall, {median:.3} median, headers included",
         files.len(),
+        if encode_only {
+            "encoded"
+        } else {
+            "round-tripped"
+        },
         bytes as f64 * 8.0 / chars as f64,
     );
     if tokens > 0 {
+        let decode = if encode_only {
+            String::new()
+        } else {
+            format!(", decode {:.0} tok/s", tokens as f64 / dec_s)
+        };
         println!(
-            "model-coded tokens: {tokens}, encode {:.0} tok/s, decode {:.0} tok/s",
-            tokens as f64 / enc_s,
-            tokens as f64 / dec_s
+            "model-coded tokens: {tokens}, encode {:.0} tok/s{decode}",
+            tokens as f64 / enc_s
         );
     }
     let hex: String = digest
@@ -218,14 +266,22 @@ fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
 
 fn run(cli: &Cli) -> Result<(), Error> {
     match &cli.cmd {
-        Cmd::Encode { input, output } => {
+        Cmd::Encode {
+            input,
+            output,
+            text,
+        } => {
             let m = load(&cli.model)?;
             let tok = Tokenizer::new(&m);
-            let text = read_input(input)?;
-            write_output(output, &compress(Some(&m), Some(&tok), &text))
+            let msg = compress(Some(&m), Some(&tok), &read_input(input)?);
+            if *text {
+                write_output(output, format!("{}\n", armor::to_text(&msg)).as_bytes())
+            } else {
+                write_output(output, &msg)
+            }
         }
         Cmd::Decode { input, output } => {
-            let msg = read_input(input)?;
+            let msg = read_message(input)?;
             // zstd and raw messages decode without loading the model
             let m = match mode_of(&msg)? {
                 Mode::Model => Some(load(&cli.model)?),
@@ -233,7 +289,8 @@ fn run(cli: &Cli) -> Result<(), Error> {
             };
             write_output(output, &decompress(m.as_ref(), &msg)?)
         }
-        Cmd::Bench { dir } => bench(&load(&cli.model)?, dir),
+        Cmd::Info { input } => info(&read_message(input)?, &cli.model),
+        Cmd::Bench { dir, encode_only } => bench(&load(&cli.model)?, dir, *encode_only),
         Cmd::Model {
             cmd: ModelCmd::Download { to },
         } => {
