@@ -136,7 +136,8 @@ jobs:
       # the CLI and upgrade tests start programs themselves, outside cargo's QEMU
       # runner, so they can't run here; they don't test the arithmetic
       - name: Tests under QEMU, golden vectors included
-        run: cargo test --target armv7-unknown-linux-gnueabihf --lib --test golden
+        run: |
+          cargo test --target armv7-unknown-linux-gnueabihf --lib --test golden -- --skip net::
 
       - name: 100 messages under QEMU
         run: |

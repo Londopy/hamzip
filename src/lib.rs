@@ -3,7 +3,9 @@
 pub mod armor;
 mod engine;
 mod model;
+pub mod net;
 mod rangecoder;
+pub mod store;
 mod tokenizer;
 
 use std::fmt;
@@ -15,6 +17,8 @@ pub use model::Model;
 pub use tokenizer::Tokenizer;
 
 const FORMAT: u8 = 1;
+/// The hamzip release this is; the CLI and the GUI share it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Text both stations put in front of every model-coded message. It costs
 /// nothing on air and gives the model a start, saving about 1% on average.
 pub const CONTEXT: &str = "Amateur radio message sent over Winlink:\n\n";

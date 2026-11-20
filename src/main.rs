@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use hamzip::{armor, compress, decompress, mode_of, Error, Mode, Model, Tokenizer};
+use hamzip::{armor, compress, decompress, mode_of, net, store, Error, Mode, Model, Tokenizer};
 use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
@@ -83,34 +83,6 @@ enum ModelCmd {
     Path,
 }
 
-fn exe_dir() -> Option<PathBuf> {
-    Some(std::env::current_exe().ok()?.parent()?.to_path_buf())
-}
-
-/// Per-user data folder; a `portable` file next to the exe keeps everything beside it.
-fn data_dir() -> PathBuf {
-    if let Some(d) = exe_dir().filter(|d| d.join("portable").exists()) {
-        return d;
-    }
-    let base = if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
-    };
-    base.unwrap_or_else(|| PathBuf::from(".")).join("hamzip")
-}
-
-/// An installed published model: next to hamzip, then in the data folder.
-fn find_installed(name: &str) -> Option<PathBuf> {
-    exe_dir()
-        .into_iter()
-        .chain([data_dir()])
-        .map(|d| d.join(format!("{name}.hzm")))
-        .find(|p| p.is_file())
-}
-
 /// The published model `--model` names, if it names one rather than a file.
 fn published(given: &Option<PathBuf>) -> Option<&'static str> {
     let s = given.as_ref()?.to_str()?;
@@ -122,57 +94,20 @@ fn custom_path(given: &Option<PathBuf>) -> bool {
     given.is_some() && published(given).is_none()
 }
 
-fn not_installed(name: &str) -> Error {
-    let other = hamzip::MODELS
-        .iter()
-        .map(|(n, _)| *n)
-        .find(|n| *n != name && find_installed(n).is_some());
-    let hint = other
-        .map(|o| format!(", or pass --model {o}"))
-        .unwrap_or_default();
-    Error::Io(format!(
-        "model {name} is not installed: run `hamzip model download {name}`{hint}"
-    ))
-}
-
 /// The file hamzip encodes with, and the published model it has to be, if any.
 fn model_path(given: &Option<PathBuf>) -> Result<(PathBuf, Option<&'static str>), Error> {
     if let (Some(p), true) = (given, custom_path(given)) {
         return Ok((p.clone(), None));
     }
     let name = published(given).unwrap_or(hamzip::MODELS[0].0);
-    find_installed(name)
+    store::find_installed(name)
         .map(|p| (p, Some(name)))
-        .ok_or_else(|| not_installed(name))
-}
-
-/// Loads a model file, and when it should be a published model, checks it is: a
-/// damaged or rebuilt file would code messages nobody else can read.
-fn load_at(path: &Path, name: Option<&str>) -> Result<Model, Error> {
-    let m = Model::load(path).map_err(|e| match e {
-        Error::Io(_) if name.is_none() && !path.exists() => Error::Io(format!(
-            "{}: no such file, and not a published model's name (see `hamzip model list`)",
-            path.display()
-        )),
-        Error::Io(_) => e,
-        e => Error::Io(format!("{}: {e}", path.display())),
-    })?;
-    if let Some(name) = name {
-        let sha: String = m.sha256.iter().map(|b| format!("{b:02x}")).collect();
-        if hamzip::model_sha256(name) != Some(sha.as_str()) {
-            return Err(Error::Io(format!(
-                "{} is not the published {name} (its SHA-256 differs); run `hamzip model \
-                 download {name}` to replace it",
-                path.display()
-            )));
-        }
-    }
-    Ok(m)
+        .ok_or_else(|| store::not_installed(name))
 }
 
 fn load(given: &Option<PathBuf>) -> Result<Model, Error> {
     let (path, name) = model_path(given)?;
-    load_at(&path, name)
+    store::load_checked(&path, name)
 }
 
 /// The model to decode a model-mode `msg` with: the published model the message
@@ -182,10 +117,7 @@ fn model_for(given: &Option<PathBuf>, msg: &[u8]) -> Result<Model, Error> {
         .get(1..3)
         .and_then(|id| hamzip::model_name([id[0], id[1]]));
     match wanted {
-        Some(name) if !custom_path(given) => match find_installed(name) {
-            Some(p) => load_at(&p, Some(name)),
-            None => Err(not_installed(name)),
-        },
+        Some(name) if !custom_path(given) => store::load_published(name),
         _ => load(given),
     }
 }
@@ -245,13 +177,13 @@ fn info(msg: &[u8], given: &Option<PathBuf>) -> Result<(), Error> {
         let id = [msg[1], msg[2]];
         println!("coded with model {}", hamzip::describe_model(id));
         match hamzip::model_name(id) {
-            Some(name) if !custom_path(given) => match find_installed(name) {
+            Some(name) if !custom_path(given) => match store::find_installed(name) {
                 Some(p) => println!("installed here: {}", p.display()),
                 None => println!("not installed here; get it with `hamzip model download {name}`"),
             },
             _ if given.is_some() => {
                 let (path, name) = model_path(given)?;
-                let m = load_at(&path, name)?;
+                let m = store::load_checked(&path, name)?;
                 let verdict = if m.id() == id {
                     "matches"
                 } else {
@@ -405,7 +337,17 @@ fn run(cli: &Cli) -> Result<(), Error> {
                 .as_deref()
                 .or(published(&cli.model))
                 .unwrap_or(hamzip::MODELS[0].0);
-            let path = upgrade::download_model(name, &to.clone().unwrap_or_else(data_dir))?;
+            let dir = to.clone().unwrap_or_else(store::data_dir);
+            let mut shown = 0;
+            let path = net::download_model(name, &dir, &mut |got, total| {
+                if got - shown >= 16 << 20 {
+                    shown = got;
+                    match total {
+                        Some(t) => eprintln!("{} of {} MB", got >> 20, t >> 20),
+                        None => eprintln!("{} MB", got >> 20),
+                    }
+                }
+            })?;
             println!("saved {}", path.display());
             Ok(())
         }
@@ -414,7 +356,7 @@ fn run(cli: &Cli) -> Result<(), Error> {
         } => {
             for (i, (name, _)) in hamzip::MODELS.iter().enumerate() {
                 let default = if i == 0 { " (default)" } else { "" };
-                match find_installed(name) {
+                match store::find_installed(name) {
                     Some(p) => println!("{name}{default}: {}", p.display()),
                     None => println!("{name}{default}: not installed"),
                 }
@@ -433,10 +375,10 @@ fn run(cli: &Cli) -> Result<(), Error> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    upgrade::clean_old_exe();
+    net::clean_old_exe();
     let notice = match cli.cmd {
         Cmd::Upgrade { .. } => None,
-        _ => upgrade::start_notice(&data_dir()),
+        _ => upgrade::start_notice(&store::data_dir()),
     };
     let result = run(&cli);
     // the check runs alongside the command; don't hold the user up waiting for it
