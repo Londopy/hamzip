@@ -24,3 +24,4 @@ installer/license.rtf
 # Secrets
 .env
 *.key
+/mix

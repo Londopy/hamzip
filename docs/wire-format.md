@@ -58,4 +58,4 @@ consume(start, size, total):
     while range < 2^56: range <<= 8, code = (code << 8) | next byte
 ```
 
-A valid stream never makes the decoder read more than 8 bytes past its end, plus whatever zero bytes the encoder trimmed. The reference decoder gives up once it is 40 bytes past the end, so a corrupt message fails within a few tokens instead of running to the end of the context.
+A valid stream never makes the decoder read more than 8 bytes past its end, plus whatever zero bytes the encoder trimmed. The reference decoder gives up once it is 40 bytes past the end, so a corrupt message stops soon after its data runs out instead of running to the end of the context.

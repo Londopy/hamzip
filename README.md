@@ -21,9 +21,9 @@ fuel 1/2 tank. Water OK through tomorrow. Need: 40 cots, infant formula. Next re
 
 ## Features
 
-- A typical 100 to 500 character message comes out at about 2.6 bits per character, framing included. Plain text is 8; zstd with a dictionary trained on ham traffic gets about 5.
+- A typical 100 to 500 character message comes out at about 2.7 bits per character, framing included. Plain text is 8; zstd with a dictionary trained on ham traffic gets about 5.
 - The model runs on integer arithmetic only, so a Windows PC, a Linux laptop and a Raspberry Pi compute exactly the same probabilities. One different probability would turn the rest of the message into garbage, which is why no floating point is involved anywhere in the coding path.
-- Every message carries a CRC-32 of the text and two bytes of the model's SHA-256. A station with a different model gets a clear error naming both, never wrong text.
+- Every message carries a CRC-32 of the text, and model-coded ones also carry two bytes of the model's SHA-256. A station with a different model gets a clear error naming both, never wrong text.
 - Short or odd text falls back to zstd or plain bytes automatically, whichever is smallest. One header byte says which.
 - The format, the arithmetic and the model are published, so anyone can decode what they hear (see [On the air](#on-the-air)).
 
@@ -37,7 +37,7 @@ Every [release](https://github.com/Londopy/hamzip/releases/latest) has the same 
 | `hamzip-<version>-x64.msi` (also `x86`, `arm64`) | MSI installer. Per-user by default; can be deployed machine-wide. |
 | `hamzip-v<version>-x64-portable.exe` (also `x86`, `arm64`) | One exe, nothing to install. |
 | `hamzip-v<version>-portable.zip` | All three Windows builds in one zip; the model and data stay next to the exe. |
-| `hamzip-v<version>-linux-aarch64` (also `armv7`, `x86_64`) | Linux binary. `aarch64` for 64-bit Raspberry Pi OS, `armv7` for 32-bit. |
+| `hamzip-v<version>-linux-aarch64` (also `armv7`, `x86_64`) | Linux binary. `aarch64` for 64-bit Raspberry Pi OS, `armv7` for 32-bit. Needs glibc 2.35 or newer (Raspberry Pi OS bookworm, Ubuntu 22.04, Debian 12). |
 | `install.ps1` / `install.cmd` | Script install that picks the right Windows build and checks its SHA-256. |
 | `<file>.torrent` / magnet link | Each download above over BitTorrent; downloads straight from GitHub even with no seeders. |
 
@@ -47,7 +47,7 @@ Every [release](https://github.com/Londopy/hamzip/releases/latest) has the same 
 irm https://github.com/Londopy/hamzip/releases/latest/download/install.ps1 | iex
 ```
 
-**Raspberry Pi or other Linux** (use the current version number and `armv7` on 32-bit Raspberry Pi OS):
+**Raspberry Pi or other Linux** (use the current version number and `armv7` on 32-bit Raspberry Pi OS). The release binaries need glibc 2.35 or newer; on Raspberry Pi OS bullseye or older, build from source instead:
 
 ```bash
 curl -LO https://github.com/Londopy/hamzip/releases/latest/download/hamzip-v0.1.0-linux-aarch64
@@ -73,6 +73,8 @@ hamzip encode message.txt -o message.hz     # or pipe: hamzip encode < message.t
 hamzip decode message.hz                    # prints the text
 hamzip decode message.hz -o message.txt
 ```
+
+In PowerShell, use the file arguments and `-o` rather than `<` and `>`: Windows PowerShell 5.1 re-encodes piped output as UTF-16, which turns a message into something hamzip can't read.
 
 Send the `.hz` file as a binary payload or attachment with whatever you already use. The receiving station runs `hamzip decode` on it.
 

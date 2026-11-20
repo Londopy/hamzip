@@ -12,7 +12,7 @@
 
 ## How I tested it
 
-- [ ] `cargo test --release`, with the published model in `models/`
+- [ ] `cargo test`, with the published model in `models/`
 - [ ] Tried it in the real app (if user-facing)
 
 ## Bits on air

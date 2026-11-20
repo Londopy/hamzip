@@ -121,9 +121,8 @@ Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
 ; `hamzip upgrade` renames the running exe to hamzip.old and deletes that the
 ; next time hamzip starts; remove one that is still there.
 Type: files; Name: "{app}\hamzip.old"
-; The data folder: the downloaded model (137 MB) and the update check's
-; timestamp. Portable copies keep theirs next to the exe instead.
-Type: filesandordirs; Name: "{localappdata}\{#AppName}"
+; The data folder (%LOCALAPPDATA%\hamzip, holding the 137 MB model) stays, as
+; it does with the MSI: a station that reinstalls offline still has its model.
 
 [Code]
 // PATH handling (from nexium): append {app} to the user's PATH, or the

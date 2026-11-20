@@ -25,6 +25,9 @@ def main():
                 lines.extend(x for x in json.loads(row)["text"].split("\n") if x.strip())
     rng = random.Random(args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
+    # a leftover larger set would change the digest
+    for old in args.out.glob("*.txt"):
+        old.unlink()
     for i in range(args.count):
         text = "\n".join(rng.choice(lines) for _ in range(rng.randint(1, 8)))
         (args.out / f"{i:05d}.txt").write_bytes(text.encode())

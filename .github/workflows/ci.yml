@@ -59,6 +59,10 @@ jobs:
         if: steps.model.outputs.cache-hit != 'true'
         run: cargo run --release -- model download --to models
 
-      # the profile the release binaries are built with
+      # the test profile keeps overflow checks on, so an arithmetic slip fails loudly
       - name: Run tests
         run: cargo test
+
+      # the shipped build has lto and no overflow checks; it must give the same bytes
+      - name: Golden vectors with the release profile
+        run: cargo test --release --test golden
