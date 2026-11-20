@@ -168,10 +168,11 @@ fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
                 f.display()
             )));
         }
-        digest.update((msg.len() as u32).to_le_bytes());
-        digest.update(&msg);
         let mode = mode_of(&msg)?;
+        // zstd output depends on the zstd version, which the format doesn't pin
         if mode == Mode::Model {
+            digest.update((msg.len() as u32).to_le_bytes());
+            digest.update(&msg);
             tokens += ntok + 1;
             enc_s += (t1 - t0).as_secs_f64();
             dec_s += (t2 - t1).as_secs_f64();
@@ -188,11 +189,16 @@ fn bench(m: &Model, dir: &Path) -> Result<(), Error> {
         );
     }
     per_msg.sort_by(f64::total_cmp);
+    let mid = per_msg.len() / 2;
+    let median = if per_msg.len() % 2 == 0 {
+        (per_msg[mid - 1] + per_msg[mid]) / 2.0
+    } else {
+        per_msg[mid]
+    };
     println!(
-        "\n{} messages round-tripped. {:.3} bpc overall, {:.3} median, headers included",
+        "\n{} messages round-tripped. {:.3} bpc overall, {median:.3} median, headers included",
         files.len(),
         bytes as f64 * 8.0 / chars as f64,
-        per_msg[per_msg.len() / 2]
     );
     if tokens > 0 {
         println!(

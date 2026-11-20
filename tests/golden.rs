@@ -1,11 +1,11 @@
 //! Fixed messages and the exact bytes they must encode to. Any machine, any
-//! build and any other implementation has to reproduce these; if one of them
-//! changes, messages sent with earlier versions no longer decode. Replace them
-//! only together with a new message format version.
+//! build and any other implementation has to reproduce the model-mode ones; if
+//! one of them changes, messages sent with earlier versions no longer decode.
+//! Replace them only together with a new message format version.
 
 use std::path::{Path, PathBuf};
 
-use hamzip::{compress, decompress, Model, Tokenizer};
+use hamzip::{compress, decompress, mode_of, Mode, Model, Tokenizer};
 
 fn model() -> Model {
     let path = std::env::var_os("HAMZIP_MODEL")
@@ -36,11 +36,20 @@ fn golden_messages_encode_and_decode_exactly() {
         let text = std::fs::read(&t).unwrap();
         let want = std::fs::read(t.with_extension("hz")).unwrap();
         let name = t.file_name().unwrap().to_string_lossy();
-        assert_eq!(
-            compress(Some(&m), Some(&tok), &text),
-            want,
-            "{name} encodes differently"
-        );
+        let got = compress(Some(&m), Some(&tok), &text);
+        let mode = mode_of(&want).unwrap();
+        assert_eq!(mode_of(&got).unwrap(), mode, "{name} picks another mode");
+        // model-mode bytes are the contract; zstd output may change with the zstd version,
+        // so for the other modes only decoding is pinned
+        if mode == Mode::Model {
+            assert_eq!(got, want, "{name} encodes differently");
+        } else {
+            assert_eq!(
+                decompress(Some(&m), &got).unwrap(),
+                text,
+                "{name} does not round-trip"
+            );
+        }
         assert_eq!(
             decompress(Some(&m), &want).unwrap(),
             text,
