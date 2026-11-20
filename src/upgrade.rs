@@ -164,9 +164,9 @@ pub fn upgrade(check_only: bool, yes: bool) -> Result<(), Error> {
         println!("not installed");
         return Ok(());
     }
-    replace_exe(&exe, &bytes).map_err(|e| {
+    replace_exe(&exe, &bytes, &["--version"]).map_err(|e| {
         Error::Io(format!(
-            "could not replace {}: {e}. If it is installed for all users, download the new installer from {}",
+            "could not replace {}: {e}. Nothing was changed; install {new} from {} instead",
             exe.display(),
             rel.html_url
         ))
@@ -179,20 +179,38 @@ fn old_path(exe: &Path) -> PathBuf {
     exe.with_extension("old")
 }
 
-// a running exe can be renamed on Windows but not overwritten, so move it aside first
-fn replace_exe(exe: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let old = old_path(exe);
-    let _ = std::fs::remove_file(&old);
-    std::fs::rename(exe, &old)?;
-    let written = File::create(exe).and_then(|mut f| f.write_all(bytes));
-    if let Err(e) = written {
-        let _ = std::fs::rename(&old, exe);
-        return Err(e);
-    }
+/// Writes the new program beside the old one and starts it once with `probe`
+/// (a build for a newer glibc fails here, not after the swap). Only then is the
+/// running exe, which Windows can rename but not overwrite, moved aside.
+fn replace_exe(exe: &Path, bytes: &[u8], probe: &[&str]) -> std::io::Result<()> {
+    let staged = exe.with_extension("new");
+    let fail = |e: std::io::Error| {
+        let _ = std::fs::remove_file(&staged);
+        e
+    };
+    File::create(&staged)
+        .and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()))
+        .map_err(fail)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(fail)?;
+    }
+    let runs = std::process::Command::new(&staged)
+        .args(probe)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !runs {
+        return Err(fail(std::io::Error::other(
+            "the downloaded program does not start on this machine",
+        )));
+    }
+    let old = old_path(exe);
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(exe, &old).map_err(fail)?;
+    if let Err(e) = std::fs::rename(&staged, exe) {
+        let _ = std::fs::rename(&old, exe);
+        return Err(fail(e));
     }
     Ok(())
 }
@@ -218,7 +236,8 @@ pub fn start_notice(data_dir: &Path) -> Option<std::sync::mpsc::Receiver<String>
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
-    if now.saturating_sub(last) < 24 * 3600 {
+    // a stamp from the future means the clock was wrong once; don't wait for it forever
+    if last <= now && now - last < 24 * 3600 {
         return None;
     }
     // record the attempt, not the success, so an offline station isn't slowed every run
@@ -249,14 +268,30 @@ fn download_checked(url: &str, sha256: &str, dest: &Path) -> Result<PathBuf, Err
     let dir = dest.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?;
     let part = dest.with_extension("part");
-    let mut resp = client(Duration::from_secs(3600))?
+    let fetched = stream_to(url, &part);
+    if fetched.as_deref().ok() != Some(sha256) {
+        let _ = std::fs::remove_file(&part);
+        fetched?;
+        return Err(Error::Io(format!(
+            "{url} does not match its SHA-256; deleted the download"
+        )));
+    }
+    std::fs::rename(&part, dest).map_err(|e| Error::Io(format!("{}: {e}", dest.display())))?;
+    Ok(dest.to_path_buf())
+}
+
+/// Writes `url` to `path` and returns the SHA-256 of what arrived.
+fn stream_to(url: &str, path: &Path) -> Result<String, Error> {
+    // reqwest applies this per read once the headers are in, so a slow but steady
+    // download is fine and a dead link gives up within a minute
+    let mut resp = client(Duration::from_secs(60))?
         .get(url)
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(net_err)?;
     let total = resp.content_length();
-    let mut file =
-        File::create(&part).map_err(|e| Error::Io(format!("{}: {e}", part.display())))?;
+    let file_err = |e: std::io::Error| Error::Io(format!("{}: {e}", path.display()));
+    let mut file = File::create(path).map_err(file_err)?;
     let mut hash = Sha256::new();
     let (mut buf, mut got, mut shown) = (vec![0u8; 1 << 16], 0u64, 0u64);
     loop {
@@ -265,8 +300,7 @@ fn download_checked(url: &str, sha256: &str, dest: &Path) -> Result<PathBuf, Err
             break;
         }
         hash.update(&buf[..n]);
-        file.write_all(&buf[..n])
-            .map_err(|e| Error::Io(format!("{}: {e}", part.display())))?;
+        file.write_all(&buf[..n]).map_err(file_err)?;
         got += n as u64;
         if got - shown >= 16 << 20 {
             shown = got;
@@ -276,15 +310,7 @@ fn download_checked(url: &str, sha256: &str, dest: &Path) -> Result<PathBuf, Err
             }
         }
     }
-    drop(file);
-    if hex(&hash.finalize()) != sha256 {
-        let _ = std::fs::remove_file(&part);
-        return Err(Error::Io(format!(
-            "{url} does not match its SHA-256; deleted the download"
-        )));
-    }
-    std::fs::rename(&part, dest).map_err(|e| Error::Io(format!("{}: {e}", dest.display())))?;
-    Ok(dest.to_path_buf())
+    Ok(hex(&hash.finalize()))
 }
 
 /// The hash `SHA256SUMS.txt` lists for `name`, in `sha256sum` format.
@@ -361,13 +387,28 @@ mod tests {
     }
 
     #[test]
-    fn replace_exe_swaps_in_the_new_bytes() {
+    fn replace_exe_swaps_in_a_program_that_runs() {
         let dir = temp_dir("swap");
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("hamzip.exe");
         std::fs::write(&exe, b"old").unwrap();
-        replace_exe(&exe, b"new").unwrap();
-        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        // this test binary is a real program; `--list` makes it exit 0
+        let new = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        replace_exe(&exe, &new, &["--list"]).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), new);
         assert_eq!(std::fs::read(old_path(&exe)).unwrap(), b"old");
+        assert!(!exe.with_extension("new").exists());
+    }
+
+    #[test]
+    fn replace_exe_keeps_the_old_one_when_the_new_does_not_start() {
+        let dir = temp_dir("junk");
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("hamzip.exe");
+        std::fs::write(&exe, b"old").unwrap();
+        let err = replace_exe(&exe, b"not a program", &["--version"]).unwrap_err();
+        assert!(err.to_string().contains("does not start"), "{err}");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        assert!(!exe.with_extension("new").exists() && !old_path(&exe).exists());
     }
 }
