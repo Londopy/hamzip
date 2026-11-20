@@ -72,6 +72,31 @@ pub enum Mode {
     Raw = 2,
 }
 
+impl Mode {
+    /// Bytes of a message in this mode that aren't the coded text: the header
+    /// byte, the CRC-32 and, in model mode, the two model id bytes.
+    pub fn framing(self) -> usize {
+        match self {
+            Mode::Model => 7,
+            _ => 5,
+        }
+    }
+}
+
+/// A message as received: binary, or its `hz:` text form anywhere in `raw`.
+pub fn message_from(raw: &[u8]) -> Result<Vec<u8>, Error> {
+    match armor::from_text(raw) {
+        Some(msg) => msg.map_err(|e| Error::BadMessage(format!("hz: text: {e}"))),
+        None if raw.is_empty() => Err(Error::BadMessage("the input is empty".into())),
+        None if raw[0] >> 4 != 1 => Err(Error::BadMessage(format!(
+            "not a hamzip message: there is no hz: line, and read as binary it would be \
+             message format {}, which this hamzip doesn't know",
+            raw[0] >> 4
+        ))),
+        None => Ok(raw.to_vec()),
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io(String),

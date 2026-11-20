@@ -8,6 +8,12 @@ description = "Text compression for slow amateur radio data links using a small 
 repository = "https://github.com/Londopy/hamzip"
 authors = ["Londopy"]
 
+[workspace]
+members = [".", "gui"]
+# the GUI pulls in a windowing stack; keep plain `cargo test` and `cargo build` headless
+default-members = ["."]
+resolver = "2"
+
 [dependencies]
 clap = { version = "4.6.8", features = ["derive", "env"] }
 crc32fast = "1.5.5"
