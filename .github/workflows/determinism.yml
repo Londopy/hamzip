@@ -1,0 +1,131 @@
+name: Determinism
+
+# Two stations can only read each other's messages if they compute the same bits.
+# Each job encodes the same generated messages and compares the digest with the one
+# measured on the x86-64 dev machine (docs/determinism.md). Slow, so it runs on main,
+# weekly and by hand rather than on every pull request.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+# a run takes over an hour; let it finish rather than cancel it for a docs push
+concurrency:
+  group: determinism-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # with an explicit shell, GitHub adds pipefail, so a hamzip crash fails the step
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # keep in step with docs/determinism.md
+  DIGEST_100: 43ff66700a0f95a8aedbffe44022f964d01a8555d99ecffbefd885dbebefef7c
+  DIGEST_2000: c945be8d4212896dd07f688dd80cd7115e6b344c2111db4430e47d7a50a1872b
+
+jobs:
+  native:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # real ARM hardware, as on a 64-bit Raspberry Pi; decodes all 2000 messages
+          - { name: "aarch64, 2000 round trips", os: ubuntu-24.04-arm, encode_only: "" }
+          # the AVX2 path on Linux
+          - { name: "x86_64, 2000 encodes", os: ubuntu-24.04, encode_only: "--encode-only" }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # same key as ci.yml, so the model downloaded there is reused
+      - name: Cache the model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: model-${{ runner.os }}-4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919
+
+      - name: Download the model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: cargo run --release -- model download --to models
+
+      - name: Tests, golden vectors included
+        run: cargo test
+
+      - name: Build the release binary
+        run: cargo build --release --locked
+
+      - name: 100 messages, round trip
+        run: |
+          python3 tools/mix.py mix100 --count 100
+          ./target/release/hamzip -m models/smollm2-135m.hzm bench mix100 | tail -3 | tee bench100.txt
+          grep -qx "digest $DIGEST_100" bench100.txt
+
+      - name: 2000 messages
+        run: |
+          python3 tools/mix.py mix --count 2000
+          ./target/release/hamzip -m models/smollm2-135m.hzm bench mix ${{ matrix.encode_only }} | tail -3 | tee bench2000.txt
+          grep -qx "digest $DIGEST_2000" bench2000.txt
+
+  armv7:
+    # 32-bit Raspberry Pi OS. There is no armv7 runner, so this cross-compiles and runs
+    # the binaries under QEMU. That is too slow to decode the 100 messages as well, but
+    # the golden vectors in cargo test decode under QEMU, and equal encodings plus the
+    # batched-equals-single test mean the decoder sees the same frequencies.
+    name: armv7 (QEMU), tests and 100 encodes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_RUNNER: qemu-arm -L /usr/arm-linux-gnueabihf
+      CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+      AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cross compiler and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross qemu-user
+
+      - name: Cache the model
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: model-${{ runner.os }}-4f3b006a37c45d5f7ac496eba7bae7deef47661feeed1891b3340e18b4b9c919
+
+      - name: Download the model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: cargo run --release -- model download --to models
+
+      # the upgrade tests start a copy of the test binary themselves, outside cargo's
+      # QEMU runner, so they can't run here; they test downloads, not the arithmetic
+      - name: Tests under QEMU, golden vectors included
+        run: |
+          cargo test --target armv7-unknown-linux-gnueabihf -- --skip upgrade::
+
+      - name: 100 messages under QEMU
+        run: |
+          cargo build --release --locked --target armv7-unknown-linux-gnueabihf
+          python3 tools/mix.py mix100 --count 100
+          qemu-arm -L /usr/arm-linux-gnueabihf target/armv7-unknown-linux-gnueabihf/release/hamzip \
+            -m models/smollm2-135m.hzm bench mix100 --encode-only | tail -3 | tee bench100.txt
+          grep -qx "digest $DIGEST_100" bench100.txt
