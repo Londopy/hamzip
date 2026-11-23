@@ -10,5 +10,6 @@ authors = ["Londopy"]
 
 [dependencies]
 hamzip = { path = ".." }
-eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow"] }
+# the defaults minus wgpu (glow is smaller) and system fonts (the app ships its own)
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11"] }
 rfd = "0.18.0"

@@ -40,6 +40,21 @@ struct Decoded {
     model: Option<String>,
 }
 
+struct DecodeFailed {
+    reason: String,
+    // the published model the message needs, when it isn't downloaded
+    missing: Option<&'static str>,
+}
+
+impl From<hamzip::Error> for DecodeFailed {
+    fn from(e: hamzip::Error) -> Self {
+        DecodeFailed {
+            reason: e.to_string(),
+            missing: None,
+        }
+    }
+}
+
 enum Update {
     Unknown,
     Available(net::Release, String),
@@ -54,7 +69,10 @@ enum Done {
     Progress(&'static str, u64, Option<u64>),
     Downloaded(&'static str, Result<(), String>),
     Compressed(u64, Result<Compressed, String>),
-    Decoded(Result<Decoded, String>, Option<(&'static str, Arc<Loaded>)>),
+    Decoded(
+        Result<Decoded, DecodeFailed>,
+        Option<(&'static str, Arc<Loaded>)>,
+    ),
     Update(Option<(net::Release, String)>),
     Installed(Result<String, String>),
 }
@@ -82,7 +100,9 @@ struct App {
     incoming: String,
     incoming_file: Option<(PathBuf, Vec<u8>)>,
     decoding: bool,
-    decoded: Option<Result<Decoded, String>>,
+    decoded: Option<Result<Decoded, DecodeFailed>>,
+    // decode again once this model has downloaded and loaded
+    redecode: Option<&'static str>,
     update: Update,
     note: Option<(String, Instant)>,
 }
@@ -114,6 +134,7 @@ impl App {
             incoming_file: None,
             decoding: false,
             decoded: None,
+            redecode: None,
             update: Update::Unknown,
             note: None,
         };
@@ -195,24 +216,38 @@ impl App {
         self.decoding = true;
         self.spawn(move || {
             let mut fresh = None;
+            let fail = |reason: String, missing| DecodeFailed { reason, missing };
             let result = (|| {
-                let msg = hamzip::message_from(&raw).map_err(|e| e.to_string())?;
-                let mode = hamzip::mode_of(&msg).map_err(|e| e.to_string())?;
+                let msg = hamzip::message_from(&raw)?;
+                let mode = hamzip::mode_of(&msg)?;
                 let mut model = None;
                 let loaded = match msg.get(1..3).filter(|_| mode == Mode::Model) {
                     Some(id) => {
                         let id = [id[0], id[1]];
                         model = Some(hamzip::describe_model(id));
                         let name = hamzip::model_name(id).ok_or_else(|| {
-                            format!(
-                                "this message was coded with model {}, which hamzip doesn't know",
-                                hamzip::describe_model(id)
+                            fail(
+                                format!(
+                                    "This message was coded with model {}, which hamzip \
+                                     doesn't know. Ask the sender which model they used.",
+                                    hamzip::describe_model(id)
+                                ),
+                                None,
                             )
                         })?;
                         match have.get(name) {
                             Some(l) => Some(l.clone()),
+                            None if store::find_installed(name).is_none() => {
+                                return Err(fail(
+                                    format!(
+                                        "This message was coded with {name}, which isn't \
+                                         downloaded on this computer yet."
+                                    ),
+                                    Some(name),
+                                ));
+                            }
                             None => {
-                                let l = load_job(name)?;
+                                let l = load_job(name).map_err(|e| fail(e, None))?;
                                 fresh = Some((name, l.clone()));
                                 Some(l)
                             }
@@ -220,8 +255,7 @@ impl App {
                     }
                     None => None,
                 };
-                let text = hamzip::decompress(loaded.as_ref().map(|l| &l.model), &msg)
-                    .map_err(|e| e.to_string())?;
+                let text = hamzip::decompress(loaded.as_ref().map(|l| &l.model), &msg)?;
                 Ok(Decoded {
                     text: String::from_utf8_lossy(&text).into_owned(),
                     mode,
@@ -263,6 +297,10 @@ impl App {
                     if name == self.selected && !self.text.is_empty() {
                         self.compress();
                     }
+                    if self.redecode == Some(name) {
+                        self.redecode = None;
+                        self.decode();
+                    }
                 }
                 Done::Loaded(name, Err(e)) => {
                     self.status.insert(name, Status::Failed(e));
@@ -288,6 +326,10 @@ impl App {
                     if let Some((name, l)) = fresh {
                         self.models.insert(name, l);
                         self.status.insert(name, Status::Ready);
+                    }
+                    if let Some(name) = done.as_ref().err().and_then(|f| f.missing) {
+                        self.redecode = Some(name);
+                        self.load(name);
                     }
                     self.decoded = Some(done);
                 }
@@ -350,7 +392,7 @@ impl App {
                 ));
             }
             Update::Failed(e) => {
-                ui.label(error_text(format!("Update failed: {e}")));
+                error_label(ui, format!("Update failed: {e}"));
             }
             Update::Unknown => {}
         }
@@ -389,7 +431,7 @@ impl App {
                 ui.add(bar.desired_width(220.0));
             }
             Some(Status::Failed(e)) => {
-                ui.label(error_text(e.clone()));
+                error_label(ui, e.clone());
                 if ui.button("Try again").clicked() {
                     self.status.remove(name);
                     if store::find_installed(name).is_some() {
@@ -462,36 +504,46 @@ impl App {
                 self.results(ui, &msg, &stats);
             }
             Some(Err(e)) => {
-                ui.label(error_text(e.clone()));
+                error_label(ui, e.clone());
             }
             None => {}
         }
     }
 
     fn results(&mut self, ui: &mut egui::Ui, msg: &[u8], s: &Stats) {
-        egui::Grid::new("results")
-            .num_columns(2)
-            .spacing([24.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("Sent as");
-                ui.label(logic::mode_label(s.mode));
-                ui.end_row();
-                ui.label("Size");
-                ui.label(format!(
-                    "{} bytes, {:.0}% of the {} byte text ({} of them framing)",
-                    s.msg_bytes,
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!("{} bytes", s.msg_bytes))
+                    .family(heavy())
+                    .size(30.0)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "{:.0}% of the {}-byte text, {:.2} bits per character (plain text is 8)",
                     s.percent_of_text(),
                     s.text_bytes,
+                    s.bits_per_char()
+                ))
+                .size(16.0),
+            );
+        });
+        ui.add_space(10.0);
+        egui::Grid::new("results")
+            .num_columns(2)
+            .spacing([24.0, 8.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("Sent").weak());
+                ui.label(format!(
+                    "{} ({} of those bytes are header, checksum and model id)",
+                    logic::mode_label(s.mode),
                     s.mode.framing()
                 ));
                 ui.end_row();
-                ui.label("Bits per character");
-                ui.label(format!("{:.2} (plain text is 8)", s.bits_per_char()));
-                ui.end_row();
-                ui.label("As hz: text");
+                ui.label(RichText::new("hz: line").weak());
                 ui.label(format!("{} characters", s.text_form_chars));
                 ui.end_row();
-                let label = ui.label("Airtime at");
+                let label = ui.label(RichText::new("Airtime at").weak());
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("rate")
                         .selected_text(format!("{} bps", self.rate))
@@ -510,9 +562,18 @@ impl App {
                 });
                 ui.end_row();
             });
-        ui.add_space(8.0);
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new(
+                "Save the .hz file for a link that carries files (VARA, ARDOP, FreeDATA, \
+                 packet). Copy the hz: line for one that carries only text, such as a \
+                 Winlink message body.",
+            )
+            .weak(),
+        );
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button("Copy hz: text").clicked() {
+            if ui.button("Copy hz: line").clicked() {
                 self.ctx.copy_text(hamzip::armor::to_text(msg));
                 self.say("Copied the hz: line. Paste it into the text mode you're using.");
             }
@@ -560,21 +621,32 @@ impl App {
                 }
             });
         } else {
+            // taken before the text box sees it, which would add a line break
+            let shortcut =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
             let edit = ui.add(
                 egui::TextEdit::multiline(&mut self.incoming)
                     .desired_rows(4)
                     .desired_width(f32::INFINITY)
                     .font(egui::TextStyle::Monospace)
-                    .hint_text("Paste an hz: line here, or open a message file."),
+                    .hint_text(
+                        "Paste an hz: line, or the whole received text around it. \
+                         Ctrl+Enter decodes.",
+                    ),
             );
             if edit.changed() {
                 self.decoded = None;
+                self.redecode = None;
+            }
+            if shortcut && edit.has_focus() && !self.incoming.trim().is_empty() && !self.decoding {
+                self.decode();
             }
         }
         let ready = self.incoming_file.is_some() || !self.incoming.trim().is_empty();
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ready && !self.decoding, egui::Button::new("Decode"))
+                .on_hover_text("Ctrl+Enter")
                 .clicked()
             {
                 self.decode();
@@ -588,16 +660,14 @@ impl App {
         ui.add_space(8.0);
         match &self.decoded {
             Some(Ok(d)) => {
-                let mut info = format!("{} mode, {} bytes", mode_name(d.mode), d.bytes);
-                if let Some(m) = &d.model {
-                    info.push_str(&format!(", model {m}"));
-                }
+                let info = logic::received_summary(d.mode, d.bytes, d.model.as_deref());
                 ui.label(RichText::new(info).weak());
                 // a &str buffer can be selected and copied but not edited
                 ui.add(
                     egui::TextEdit::multiline(&mut d.text.as_str())
                         .desired_rows(8)
-                        .desired_width(f32::INFINITY),
+                        .desired_width(f32::INFINITY)
+                        .background_color(ui.visuals().extreme_bg_color),
                 );
                 ui.horizontal(|ui| {
                     if ui.button("Copy text").clicked() {
@@ -623,7 +693,12 @@ impl App {
                 });
             }
             Some(Err(e)) => {
-                ui.label(error_text(e.clone()));
+                let (reason, missing) = (e.reason.clone(), e.missing);
+                error_label(ui, reason);
+                if let Some(name) = missing {
+                    ui.horizontal(|ui| self.model_status(ui, name));
+                    ui.label(RichText::new("It decodes as soon as the model is ready.").weak());
+                }
             }
             None if !ready => {
                 ui.label(RichText::new("The decoded text shows up here.").weak());
@@ -633,16 +708,13 @@ impl App {
     }
 }
 
-fn mode_name(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Model => "model",
-        Mode::Zstd => "zstd",
-        Mode::Raw => "plain text",
-    }
+fn error_label(ui: &mut egui::Ui, s: String) {
+    let color = ui.visuals().error_fg_color;
+    ui.label(RichText::new(s).color(color));
 }
 
-fn error_text(s: String) -> RichText {
-    RichText::new(s).color(Color32::from_rgb(0xD0, 0x40, 0x30))
+fn heavy() -> egui::FontFamily {
+    egui::FontFamily::Name("bold".into())
 }
 
 impl eframe::App for App {
@@ -710,18 +782,78 @@ fn icon() -> egui::IconData {
     }
 }
 
+fn fonts(ctx: &egui::Context) {
+    // Atkinson Hyperlegible keeps 0/O, 1/l/I and B/8 apart, which matters in callsigns
+    let mut fonts = egui::FontDefinitions::default();
+    for (name, bytes) in [
+        (
+            "atkinson",
+            &include_bytes!("../fonts/AtkinsonHyperlegible-Regular.ttf")[..],
+        ),
+        (
+            "atkinson-bold",
+            &include_bytes!("../fonts/AtkinsonHyperlegible-Bold.ttf")[..],
+        ),
+    ] {
+        fonts
+            .font_data
+            .insert(name.into(), Arc::new(egui::FontData::from_static(bytes)));
+    }
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "atkinson".into());
+    let mut bold = vec!["atkinson-bold".to_string()];
+    bold.extend(
+        fonts.families[&egui::FontFamily::Proportional]
+            .iter()
+            .skip(1)
+            .cloned(),
+    );
+    fonts.families.insert(heavy(), bold);
+    ctx.set_fonts(fonts);
+}
+
 fn style(ctx: &egui::Context) {
-    // amber for the accent rather than egui's blue, in both light and dark
-    for (theme, accent) in [
-        (egui::Theme::Light, Color32::from_rgb(0xB8, 0x5C, 0x00)),
-        (egui::Theme::Dark, Color32::from_rgb(0xF0, 0xA0, 0x40)),
+    fonts(ctx);
+    // amber for the accent rather than egui's blue; egui's pure red errors and faded
+    // gray fall under 4.5:1 contrast on the light background
+    for (theme, accent, error, weak) in [
+        (
+            egui::Theme::Light,
+            Color32::from_rgb(0xB8, 0x5C, 0x00),
+            Color32::from_rgb(0xB4, 0x23, 0x18),
+            Color32::from_rgb(0x5C, 0x5C, 0x5C),
+        ),
+        (
+            egui::Theme::Dark,
+            Color32::from_rgb(0xF0, 0xA0, 0x40),
+            Color32::from_rgb(0xFF, 0x8A, 0x70),
+            Color32::from_rgb(0x9C, 0x9C, 0x9C),
+        ),
     ] {
         ctx.style_mut_of(theme, |s| {
+            s.visuals.error_fg_color = error;
+            s.visuals.weak_text_color = Some(weak);
             s.visuals.selection.bg_fill = accent.linear_multiply(0.35);
             // text drawn over the accent, such as on the progress bar, keeps full contrast
             s.visuals.selection.stroke.color = s.visuals.strong_text_color();
             s.visuals.hyperlink_color = accent;
             s.spacing.button_padding = egui::vec2(10.0, 5.0);
+            // as tall as a button at this text size, so labels beside buttons line up
+            s.spacing.interact_size.y = 28.0;
+            for (text, size) in [
+                (egui::TextStyle::Body, 15.0),
+                (egui::TextStyle::Button, 15.0),
+                (egui::TextStyle::Monospace, 14.0),
+                (egui::TextStyle::Heading, 22.0),
+                (egui::TextStyle::Small, 12.0),
+            ] {
+                if let Some(font) = s.text_styles.get_mut(&text) {
+                    font.size = size;
+                }
+            }
         });
     }
 }

@@ -40,9 +40,18 @@ impl Stats {
 
 pub fn mode_label(mode: Mode) -> &'static str {
     match mode {
-        Mode::Model => "model",
-        Mode::Zstd => "zstd (the model didn't help here)",
-        Mode::Raw => "plain text (too short to compress)",
+        Mode::Model => "coded with the model",
+        Mode::Zstd => "zstd, because the model didn't help here",
+        Mode::Raw => "as plain text, too short to compress",
+    }
+}
+
+/// One line on how a received message was sent, for above its decoded text.
+pub fn received_summary(mode: Mode, bytes: usize, model: Option<&str>) -> String {
+    match (mode, model) {
+        (Mode::Model, Some(m)) => format!("Coded with {m}, {bytes} bytes on air"),
+        (Mode::Zstd, _) => format!("Sent as zstd, {bytes} bytes on air"),
+        _ => format!("Sent as plain text, {bytes} bytes on air"),
     }
 }
 
@@ -119,8 +128,20 @@ mod tests {
 
     #[test]
     fn every_mode_has_a_label_that_says_why() {
-        assert_eq!(mode_label(Mode::Model), "model");
-        assert!(mode_label(Mode::Zstd).contains("zstd"));
-        assert!(mode_label(Mode::Raw).contains("plain"));
+        assert!(mode_label(Mode::Model).contains("model"));
+        assert!(mode_label(Mode::Zstd).contains("didn't help"));
+        assert!(mode_label(Mode::Raw).contains("too short"));
+    }
+
+    #[test]
+    fn a_received_message_names_its_model() {
+        assert_eq!(
+            received_summary(Mode::Model, 62, Some("smollm2-135m (4f3b..)")),
+            "Coded with smollm2-135m (4f3b..), 62 bytes on air"
+        );
+        assert_eq!(
+            received_summary(Mode::Raw, 11, None),
+            "Sent as plain text, 11 bytes on air"
+        );
     }
 }
