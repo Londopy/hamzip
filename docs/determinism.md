@@ -31,11 +31,12 @@ These are for message format 1; run `bench` with `--model smollm2-360m` for the 
 
 The aarch64 run is the one that matters most for a Raspberry Pi: it decodes all 2000 messages on real ARM hardware, from encodings bit-identical to the x86 reference, so a Pi decodes what a Windows PC sends. It also ran faster than expected, about 190 tokens a second encoding and 130 decoding on a 4-core runner. That is a server-class ARM core, though, not a Pi. The armv7 job runs under emulation at about 3 tokens a second, which is why it only encodes the 100-message set; its golden-vector test decodes under QEMU. The CLI and upgrade tests start programs themselves, outside cargo's QEMU runner, so that job runs only the library tests and golden vectors; the others test the command line and downloads, not the arithmetic.
 
+smollm2-360m matches its 100-message digest on the Windows reference and on both native GitHub runners, where all 100 messages round-trip. It hasn't been run on 32-bit ARM or 32-bit Windows.
+
 Messages from the earlier local runs under Docker's QEMU (aarch64 and armv7, before the shared context was added) also matched x86 exactly.
 
 ## Not checked yet
 
-- smollm2-360m anywhere but the Windows dev machine, where all 100 messages round-trip; the Determinism workflow adds it on ARM and x86 Linux.
 - A real Raspberry Pi, including its speed. The native aarch64 runner shows the arithmetic agrees on ARM; a Pi's slower cores and memory will decode more slowly.
 - The Windows arm64 build.
 - A message sent over the air, for example over VARA FM, timed with and without hamzip.

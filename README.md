@@ -22,10 +22,11 @@ fuel 1/2 tank. Water OK through tomorrow. Need: 40 cots, infant formula. Next re
 ## Features
 
 - A typical message comes out at about 2.6 bits per character, framing included, or 2.3 with the larger model. Plain text is 8; zstd with a dictionary trained on the same kind of traffic gets about 5.
-- The model runs on integer arithmetic only, so every machine computes exactly the same probabilities. One different probability would turn the rest of the message into garbage, which is why no floating point is involved anywhere in the coding path. So far that has been checked on Windows (64- and 32-bit), Linux on x86-64, and Linux on 64-bit ARM servers, the same build a 64-bit Raspberry Pi runs; it hasn't been run on a real Pi yet ([docs/determinism.md](docs/determinism.md)). Those checks used the default model; smollm2-360m has so far run only on the dev machine.
+- The model runs on integer arithmetic only, so every machine computes exactly the same probabilities. One different probability would turn the rest of the message into garbage, which is why no floating point is involved anywhere in the coding path. So far that has been checked on Windows (64- and 32-bit), Linux on x86-64, and Linux on 64-bit ARM servers, the same build a 64-bit Raspberry Pi runs; it hasn't been run on a real Pi yet ([docs/determinism.md](docs/determinism.md)). smollm2-360m has been checked on 64-bit Windows, x86-64 Linux and 64-bit ARM.
 - Every message carries a CRC-32 of the text, and model-coded ones also carry two bytes of the model's SHA-256. A station with a different model gets an error showing both model ids, never wrong text.
 - Short or odd text falls back to zstd or plain bytes automatically, whichever is smallest. One header byte says which.
 - For channels that deliver text intact but not files, such as a Winlink message body, `--text` writes the message as a line of `hz:` base64 you can paste. The line is base64, so it is a third longer than the binary message: a message of a few hundred characters comes out at a little under half its length (a median 45% on the test corpus); short ones gain less, and hamzip tells you when sending the text as it is would be shorter. The mode has to pass both cases, digits, `+`, `/`, `=` and `:`, which rules out JS8Call's restricted alphabet. Over a keyboard mode without ARQ (most fldigi modes), a single wrong character makes the message undecodable; the CRC tells you, but nothing can recover it, so use those only with an ARQ layer such as FLARQ.
+- A desktop window, hamzip-gui, does the same for anyone who'd rather not use a command line: type a message to see its size and airtime, copy its `hz:` line, decode a pasted transcript, and download models (see [The window](#the-window)).
 - The format, the arithmetic and the model are published, so anyone can decode what they hear (see [On the air](#on-the-air)).
 
 ## Install
@@ -34,11 +35,12 @@ Every [release](https://github.com/Londopy/hamzip/releases/latest) has the same 
 
 | Download | What it is |
 |---|---|
-| `hamzip-<version>-setup-x64.exe` | **Installer (recommended).** Per-user, no admin prompt, adds `hamzip` to your PATH. |
+| `hamzip-<version>-setup-x64.exe` | **Installer (recommended).** Per-user, no admin prompt. Puts the window in the Start menu as "hamzip" and adds the `hamzip` command to your PATH. |
 | `hamzip-<version>-x64.msi` (also `x86`, `arm64`) | MSI installer. Per-user by default; can be deployed machine-wide. |
-| `hamzip-v<version>-x64-portable.exe` (also `x86`, `arm64`) | One exe, nothing to install. |
-| `hamzip-v<version>-portable.zip` | All three Windows builds in one zip; the model and data stay next to the exe. |
-| `hamzip-v<version>-linux-aarch64` (also `armv7`, `x86_64`) | Linux binary. `aarch64` for 64-bit Raspberry Pi OS, `armv7` for 32-bit. Needs glibc 2.35 or newer (Raspberry Pi OS bookworm, Ubuntu 22.04, Debian 12). |
+| `hamzip-v<version>-x64-portable.exe` (also `x86`, `arm64`) | The command line, one exe, nothing to install. |
+| `hamzip-gui-v<version>-x64-portable.exe` (also `x86`, `arm64`) | The window, one exe, nothing to install. |
+| `hamzip-v<version>-portable.zip` | Both programs for all three Windows architectures in one zip; the model and data stay next to the exe. |
+| `hamzip-v<version>-linux-aarch64` (also `armv7`, `x86_64`) | Linux binary. `aarch64` for 64-bit Raspberry Pi OS, `armv7` for 32-bit. Needs glibc 2.35 or newer (Raspberry Pi OS bookworm, Ubuntu 22.04, Debian 12). `hamzip-gui-v<version>-linux-aarch64` and `-linux-x86_64` are the window for Linux desktops; 32-bit ARM has the command line only. |
 | `install.ps1` / `install.cmd` | Script install that picks the right Windows build and checks its SHA-256. |
 | `<file>.torrent` / magnet link | Each download above over BitTorrent; downloads straight from GitHub even with no seeders. |
 
@@ -65,7 +67,7 @@ That fetches `smollm2-135m.hzm` (137 MB) and refuses to keep it unless its SHA-2
 
 The binaries are not code-signed, so Windows SmartScreen may warn on first run. Every release ships `SHA256SUMS.txt`; check a download with `(Get-FileHash .\<file> -Algorithm SHA256).Hash` on Windows or `sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux.
 
-`hamzip upgrade` replaces hamzip with the latest release after checking it against `SHA256SUMS.txt`, and asks before it does. Once a day, when you run hamzip in a terminal with internet, it mentions a newer version on stderr; set `HAMZIP_NO_UPDATE_CHECK=1` to turn that off.
+`hamzip upgrade` replaces hamzip, and hamzip-gui beside it, with the latest release after checking both against `SHA256SUMS.txt`, and asks before it does; the window offers the same when an update is out. Once a day, when you run hamzip in a terminal with internet, it mentions a newer version on stderr; set `HAMZIP_NO_UPDATE_CHECK=1` to turn that off.
 
 ## Usage
 
@@ -92,6 +94,15 @@ Send the `.hz` file as a binary payload or attachment with whatever you already 
 hamzip helps most where you control the payload byte for byte: FreeDATA, ARDOP or VARA sessions between your own programs, packet. Winlink should work too, with the `.hz` file attached, but Winlink already compresses message bodies and adds its own headers, so the saving on a short Winlink message will be smaller than the numbers below. None of these transports has been tested on the air with hamzip yet.
 
 `hamzip bench <folder>` encodes and decodes every file in a folder and prints sizes, speed and a digest of all the output (see [Checking two stations agree](#checking-two-stations-agree)).
+
+## The window
+
+hamzip-gui (Start menu: hamzip) has two tabs:
+
+- **Compress:** type or paste a message, or open a text file. As you type it shows how the message would go out (model, zstd or plain text), its size against the plain text, bits per character, the length of its `hz:` line, and the airtime at a link speed you pick, for the payload alone. **Copy hz: text** puts the line on the clipboard; **Save message file** writes the binary `.hz`.
+- **Decode:** paste a received `hz:` line, or the whole received transcript around it, or open a `.hz` file. It decodes with whichever installed model the message names and shows the text, which you can copy or save.
+
+The top bar picks the model to compress with and shows whether it is loading, ready, or not downloaded yet, with a **Download** button and progress. The window follows your system's light or dark setting. It uses the same library, models and data folder as the command line, so anything one does, the other can read.
 
 ## How is this different from zip or zstd?
 
@@ -160,7 +171,6 @@ Equal digests mean both machines produce identical messages, so each can decode 
 - A real Raspberry Pi. The ARM build has matched the x86 reference on GitHub's ARM servers and under emulation, but not on a Pi, and a Pi's speed is unmeasured.
 - Sending over the air. The design calls for timing real messages over a VARA FM link with and without hamzip; that hasn't been done, and neither has any test over Winlink, FreeDATA, ARDOP or packet.
 - The Windows arm64 build, which is built and published but has never been run.
-- smollm2-360m anywhere but the Windows dev machine; the Determinism workflow checks it on ARM and x86 Linux from the next release on.
 - Whether the FCC sees a published model file as public documentation (see [On the air](#on-the-air)).
 
 ## Configuration
@@ -186,6 +196,13 @@ cargo test
 ```
 
 The tests need the model in `models/` (or `HAMZIP_MODEL`); they fail rather than skip without it.
+
+The window is a separate package, left out of the plain `cargo build` and `cargo test` so those need no windowing libraries. Build and test it with `-p hamzip-gui`; on Linux, install `libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev` first:
+
+```bash
+cargo build --release -p hamzip-gui
+cargo test -p hamzip-gui
+```
 
 To build the model file yourself from the original weights:
 
@@ -219,9 +236,12 @@ src/
   tokenizer.rs   byte-level BPE encoder
   model.rs       model file loader and checks
   lib.rs         message format: model, zstd and raw modes
-  main.rs        CLI
-  upgrade.rs     model download, self-upgrade, update notice
   armor.rs       hz: text form for text-only modes
+  store.rs       where models are installed, loading them with their hash checked
+  net.rs         model downloads and self-upgrade, shared by both programs
+  main.rs        CLI
+  upgrade.rs     the CLI's upgrade prompt and daily update notice
+gui/             hamzip-gui, the desktop window (eframe)
 tests/golden/    fixed messages and the bytes they must encode to
 tools/           corpus benchmark, model converter, message mixer (Python)
 corpus/          test messages written for this project
@@ -236,4 +256,4 @@ Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). An
 
 ## License
 
-hamzip is licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. The model file is derived from SmolLM2-135M by Hugging Face, which is licensed under Apache-2.0. The test corpus was written for this project; all names and callsigns in it are made up.
+hamzip is licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. The model files are derived from SmolLM2-135M and SmolLM2-360M by Hugging Face, which are licensed under Apache-2.0. The window's font, Atkinson Hyperlegible by the Braille Institute, is under the SIL Open Font License ([gui/fonts/OFL.txt](gui/fonts/OFL.txt)). The test corpus was written for this project; all names and callsigns in it are made up.

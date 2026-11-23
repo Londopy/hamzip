@@ -4,6 +4,14 @@ All notable changes to hamzip are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- hamzip-gui, a desktop window for Windows and Linux. It shows a message's size, bits per character and airtime as you type, copies its `hz:` line, decodes a pasted transcript or a message file, downloads models, and offers updates. The installers put it in the Start menu as "hamzip".
+
+### Changed
+
+- `hamzip upgrade` also updates hamzip-gui when it sits beside hamzip, checking every download before replacing anything.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added
