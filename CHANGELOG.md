@@ -4,13 +4,15 @@ All notable changes to hamzip are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
+
 ### Added
 
 - hamzip-gui, a desktop window for Windows and Linux. It shows a message's size, bits per character and airtime as you type, copies its `hz:` line, decodes a pasted transcript or a message file, downloads models, and offers updates. The installers put it in the Start menu as "hamzip".
 
 ### Changed
 
-- `hamzip upgrade` also updates hamzip-gui when it sits beside hamzip, checking every download before replacing anything.
+- `hamzip upgrade` also updates hamzip-gui when it sits beside hamzip. It checks every download and starts each new build once before replacing anything, and replaces both programs or neither.
 
 ## [0.2.0] - 2026-11-19
 
@@ -39,6 +41,7 @@ All notable changes to hamzip are listed here. The format follows [Keep a Change
 - Golden vectors: fixed messages and the exact bytes they must encode to, checked by `cargo test`.
 - Downloads for Windows (installer, MSIs, portable exes and zip, `install.ps1`) and for Linux on x86_64, aarch64 and armv7 (Raspberry Pi), with `SHA256SUMS.txt` and torrents.
 
-[Unreleased]: https://github.com/Londopy/hamzip/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Londopy/hamzip/compare/v0.3.0...HEAD
 [0.1.0]: https://github.com/Londopy/hamzip/releases/tag/v0.1.0
 [0.2.0]: https://github.com/Londopy/hamzip/compare/v0.1.0...v0.2.0
+[0.3.0]: https://github.com/Londopy/hamzip/compare/v0.2.0...v0.3.0

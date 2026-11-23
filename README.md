@@ -256,4 +256,4 @@ Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). An
 
 ## License
 
-hamzip is licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. The model files are derived from SmolLM2-135M and SmolLM2-360M by Hugging Face, which are licensed under Apache-2.0. The window's font, Atkinson Hyperlegible by the Braille Institute, is under the SIL Open Font License ([gui/fonts/OFL.txt](gui/fonts/OFL.txt)). The test corpus was written for this project; all names and callsigns in it are made up.
+hamzip is licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. The model files are derived from SmolLM2-135M and SmolLM2-360M by Hugging Face, which are licensed under Apache-2.0. The window's font, Atkinson Hyperlegible by the Braille Institute, is under the SIL Open Font License ([gui/fonts/OFL.txt](gui/fonts/OFL.txt)); egui's fallback fonts carry their own licenses, in [gui/fonts/egui](gui/fonts/egui). The test corpus was written for this project; all names and callsigns in it are made up.
