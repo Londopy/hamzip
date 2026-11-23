@@ -35,6 +35,8 @@ struct Compressed {
 
 struct Decoded {
     text: String,
+    // the bytes as sent, which "Save text" writes even when they aren't UTF-8
+    raw: Vec<u8>,
     mode: Mode,
     bytes: usize,
     model: Option<String>,
@@ -70,6 +72,7 @@ enum Done {
     Downloaded(&'static str, Result<(), String>),
     Compressed(u64, Result<Compressed, String>),
     Decoded(
+        u64,
         Result<Decoded, DecodeFailed>,
         Option<(&'static str, Arc<Loaded>)>,
     ),
@@ -93,12 +96,13 @@ struct App {
     tab: Tab,
     text: String,
     edited: Option<Instant>,
-    generation: u64,
-    compressing: bool,
-    compressed: Option<Result<Compressed, String>>,
+    jobs: logic::Latest,
+    // with the generation it was made for, to tell when the text has moved on
+    compressed: Option<(u64, Result<Compressed, String>)>,
     rate: u32,
     incoming: String,
     incoming_file: Option<(PathBuf, Vec<u8>)>,
+    decode_gen: u64,
     decoding: bool,
     decoded: Option<Result<Decoded, DecodeFailed>>,
     // decode again once this model has downloaded and loaded
@@ -126,12 +130,12 @@ impl App {
             tab: Tab::Compress,
             text: String::new(),
             edited: None,
-            generation: 0,
-            compressing: false,
+            jobs: logic::Latest::default(),
             compressed: None,
             rate: 1200,
             incoming: String::new(),
             incoming_file: None,
+            decode_gen: 0,
             decoding: false,
             decoded: None,
             redecode: None,
@@ -139,15 +143,23 @@ impl App {
             note: None,
         };
         app.load(app.selected);
-        if std::env::var_os("HAMZIP_NO_UPDATE_CHECK").is_none() {
-            app.spawn(|| {
-                let found = net::latest_release(Duration::from_secs(10))
-                    .ok()
-                    .and_then(|r| net::newer(&r).map(|v| (r, v.to_string())));
-                Done::Update(found)
-            });
+        let off = ["HAMZIP_NO_UPDATE_CHECK", "CI"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some());
+        if !off {
+            app.check_update();
         }
         app
+    }
+
+    fn check_update(&mut self) {
+        self.update = Update::Unknown;
+        self.spawn(|| {
+            let found = net::latest_release(Duration::from_secs(10))
+                .ok()
+                .and_then(|r| net::newer(&r).map(|v| (r, v.to_string())));
+            Done::Update(found)
+        });
     }
 
     fn spawn(&self, job: impl FnOnce() -> Done + Send + 'static) {
@@ -158,8 +170,13 @@ impl App {
         });
     }
 
+    fn downloading(&self, name: &str) -> bool {
+        matches!(self.status.get(name), Some(Status::Downloading(..)))
+    }
+
     fn load(&mut self, name: &'static str) {
-        if self.models.contains_key(name) {
+        // the file isn't there until the download finishes, which then loads it
+        if self.models.contains_key(name) || self.downloading(name) {
             return;
         }
         if store::find_installed(name).is_none() {
@@ -171,6 +188,10 @@ impl App {
     }
 
     fn download(&mut self, name: &'static str) {
+        // a second download would write the same .part file
+        if self.downloading(name) {
+            return;
+        }
         self.status.insert(name, Status::Downloading(0, None));
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.spawn(move || {
@@ -188,7 +209,6 @@ impl App {
 
     fn compress(&mut self) {
         self.edited = None;
-        self.generation += 1;
         if self.text.is_empty() {
             self.compressed = None;
             return;
@@ -196,8 +216,10 @@ impl App {
         let Some(loaded) = self.models.get(self.selected).cloned() else {
             return;
         };
-        self.compressing = true;
-        let (generation, text) = (self.generation, self.text.clone());
+        let Some(generation) = self.jobs.start() else {
+            return;
+        };
+        let text = self.text.clone();
         self.spawn(move || {
             let msg = hamzip::compress(Some(&loaded.model), Some(&loaded.tok), text.as_bytes());
             let done = Stats::new(&text, &msg)
@@ -213,6 +235,8 @@ impl App {
             None => self.incoming.clone().into_bytes(),
         };
         let have: HashMap<&'static str, Arc<Loaded>> = self.models.clone();
+        self.decode_gen += 1;
+        let generation = self.decode_gen;
         self.decoding = true;
         self.spawn(move || {
             let mut fresh = None;
@@ -255,16 +279,25 @@ impl App {
                     }
                     None => None,
                 };
-                let text = hamzip::decompress(loaded.as_ref().map(|l| &l.model), &msg)?;
+                let raw = hamzip::decompress(loaded.as_ref().map(|l| &l.model), &msg)?;
                 Ok(Decoded {
-                    text: String::from_utf8_lossy(&text).into_owned(),
+                    text: String::from_utf8_lossy(&raw).into_owned(),
+                    raw,
                     mode,
                     bytes: msg.len(),
                     model,
                 })
             })();
-            Done::Decoded(result, fresh)
+            Done::Decoded(generation, result, fresh)
         });
+    }
+
+    /// Drops a decode on its way and its result, for input that has changed.
+    fn forget_decode(&mut self) {
+        self.decode_gen += 1;
+        self.decoding = false;
+        self.decoded = None;
+        self.redecode = None;
     }
 
     fn install_update(&mut self) {
@@ -274,16 +307,17 @@ impl App {
             return;
         };
         self.spawn(move || {
-            let programs = store::exe_dir()
-                .map(|d| net::installed_programs(&d))
-                .unwrap_or_default();
-            let done = if programs.is_empty() {
-                Err("couldn't find the installed hamzip programs".to_string())
-            } else {
-                net::install(&rel, &programs)
-                    .map(|_| version)
-                    .map_err(|e| e.to_string())
-            };
+            let done = std::env::current_exe()
+                .map_err(|e| format!("finding this program: {e}"))
+                .and_then(|exe| {
+                    let programs = net::programs_beside(&exe, "hamzip-gui");
+                    net::fetch(&rel, &programs)
+                        .and_then(|f| net::replace_all(&f))
+                        .map_err(|e| {
+                            format!("{e}; install {version} from {} instead", rel.html_url)
+                        })
+                })
+                .map(|_| version);
             Done::Installed(done)
         });
     }
@@ -316,17 +350,23 @@ impl App {
                     self.status.insert(name, Status::Failed(e));
                 }
                 Done::Compressed(generation, done) => {
-                    if generation == self.generation {
-                        self.compressing = false;
-                        self.compressed = Some(done);
+                    let (show, again) = self.jobs.finish(generation);
+                    if show {
+                        self.compressed = Some((generation, done));
+                    }
+                    if again {
+                        self.compress();
                     }
                 }
-                Done::Decoded(done, fresh) => {
-                    self.decoding = false;
+                Done::Decoded(generation, done, fresh) => {
                     if let Some((name, l)) = fresh {
                         self.models.insert(name, l);
                         self.status.insert(name, Status::Ready);
                     }
+                    if generation != self.decode_gen {
+                        continue;
+                    }
+                    self.decoding = false;
                     if let Some(name) = done.as_ref().err().and_then(|f| f.missing) {
                         self.redecode = Some(name);
                         self.load(name);
@@ -365,6 +405,7 @@ impl App {
                 .response
                 .labelled_by(label.id);
             if self.selected != before {
+                self.jobs.changed();
                 self.load(self.selected);
                 self.compress();
             }
@@ -392,7 +433,13 @@ impl App {
                 ));
             }
             Update::Failed(e) => {
-                error_label(ui, format!("Update failed: {e}"));
+                let e = e.clone();
+                ui.horizontal_wrapped(|ui| {
+                    error_label(ui, format!("Update failed: {e}"));
+                    if ui.button("Try again").clicked() {
+                        self.check_update();
+                    }
+                });
             }
             Update::Unknown => {}
         }
@@ -409,12 +456,7 @@ impl App {
             }
             Some(Status::Missing) => {
                 ui.label("not downloaded");
-                let size = if name == MODELS[0].0 {
-                    "137 MB"
-                } else {
-                    "365 MB"
-                };
-                if ui.button(format!("Download ({size})")).clicked() {
+                if ui.button(download_label(name)).clicked() {
                     self.download(name);
                 }
             }
@@ -432,44 +474,60 @@ impl App {
             }
             Some(Status::Failed(e)) => {
                 error_label(ui, e.clone());
-                if ui.button("Try again").clicked() {
+                let installed = store::find_installed(name).is_some();
+                if installed && ui.button("Try again").clicked() {
                     self.status.remove(name);
-                    if store::find_installed(name).is_some() {
-                        self.load(name);
-                    } else {
-                        self.download(name);
-                    }
+                    self.load(name);
+                }
+                // a damaged or rebuilt file is replaced when the download finishes
+                let again = if installed {
+                    "Download again".to_string()
+                } else {
+                    download_label(name)
+                };
+                if ui.button(again).clicked() {
+                    self.status.remove(name);
+                    self.download(name);
                 }
             }
         }
     }
 
     fn compress_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let label = ui.label("Message to send");
-            if ui.button("Open text file…").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Text", &["txt"])
-                    .pick_file()
-                {
-                    match std::fs::read_to_string(&path) {
-                        Ok(t) => {
-                            self.text = t;
-                            self.compress();
+        let label = ui
+            .horizontal(|ui| {
+                let label = ui.label("Message to send");
+                if ui.button("Open text file…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Text", &["txt"])
+                        .pick_file()
+                    {
+                        match read_small(&path).and_then(|b| {
+                            String::from_utf8(b)
+                                .map_err(|_| format!("{} isn't UTF-8 text", path.display()))
+                        }) {
+                            Ok(t) => {
+                                self.text = t;
+                                self.jobs.changed();
+                                self.compress();
+                            }
+                            Err(e) => self.say(e),
                         }
-                        Err(e) => self.say(format!("Couldn't read {}: {e}", path.display())),
                     }
                 }
-            }
-            label
-        });
-        let edit = ui.add(
-            egui::TextEdit::multiline(&mut self.text)
-                .desired_rows(8)
-                .desired_width(f32::INFINITY)
-                .hint_text("Type or paste the text you want to send."),
-        );
+                label
+            })
+            .inner;
+        let edit = ui
+            .add(
+                egui::TextEdit::multiline(&mut self.text)
+                    .desired_rows(8)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Type or paste the text you want to send."),
+            )
+            .labelled_by(label.id);
         if edit.changed() {
+            self.jobs.changed();
             self.edited = Some(Instant::now());
             self.ctx.request_repaint_after(TYPING_PAUSE);
         }
@@ -492,21 +550,26 @@ impl App {
             ui.label(RichText::new(why).weak());
             return;
         }
-        if self.compressing {
+        let stale = self
+            .compressed
+            .as_ref()
+            .is_none_or(|(generation, _)| !self.jobs.is_current(*generation));
+        if stale {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label("Compressing…");
             });
         }
         match &self.compressed {
-            Some(Ok(c)) => {
+            Some((_, Ok(c))) => {
                 let (msg, stats) = (c.msg.clone(), c.stats.clone());
-                self.results(ui, &msg, &stats);
+                // an older result stays visible but can't be copied or saved
+                ui.add_enabled_ui(!stale, |ui| self.results(ui, &msg, &stats));
             }
-            Some(Err(e)) => {
+            Some((_, Err(e))) if !stale => {
                 error_label(ui, e.clone());
             }
-            None => {}
+            _ => {}
         }
     }
 
@@ -541,7 +604,15 @@ impl App {
                 ));
                 ui.end_row();
                 ui.label(RichText::new("hz: line").weak());
-                ui.label(format!("{} characters", s.text_form_chars));
+                if s.text_form_chars >= s.text_bytes {
+                    ui.label(format!(
+                        "{} characters, no shorter than the text itself: over a text \
+                         channel, send the text as it is",
+                        s.text_form_chars
+                    ));
+                } else {
+                    ui.label(format!("{} characters", s.text_form_chars));
+                }
                 ui.end_row();
                 let label = ui.label(RichText::new("Airtime at").weak());
                 ui.horizontal(|ui| {
@@ -593,56 +664,59 @@ impl App {
     }
 
     fn decode_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let label = ui.label("Received message");
-            if ui.button("Open message file…").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("hamzip message", &["hz", "txt"])
-                    .pick_file()
-                {
-                    match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            self.incoming_file = Some((path, bytes));
-                            self.decode();
+        // taken before the text box sees it, which would add a line break
+        let shortcut = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
+        let label = ui
+            .horizontal(|ui| {
+                let label = ui.label("Received message");
+                if ui.button("Open message file…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("hamzip message", &["hz", "txt"])
+                        .pick_file()
+                    {
+                        match read_small(&path) {
+                            Ok(bytes) => {
+                                self.forget_decode();
+                                self.incoming_file = Some((path, bytes));
+                                self.decode();
+                            }
+                            Err(e) => self.say(e),
                         }
-                        Err(e) => self.say(format!("Couldn't read {}: {e}", path.display())),
                     }
                 }
-            }
-            label
-        });
+                label
+            })
+            .inner;
         if let Some((path, bytes)) = &self.incoming_file {
             let shown = format!("{} ({} bytes)", path.display(), bytes.len());
             ui.horizontal(|ui| {
                 ui.label(shown);
                 if ui.button("Clear").clicked() {
                     self.incoming_file = None;
-                    self.decoded = None;
+                    self.forget_decode();
                 }
             });
         } else {
-            // taken before the text box sees it, which would add a line break
-            let shortcut =
-                ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
-            let edit = ui.add(
-                egui::TextEdit::multiline(&mut self.incoming)
-                    .desired_rows(4)
-                    .desired_width(f32::INFINITY)
-                    .font(egui::TextStyle::Monospace)
-                    .hint_text(
-                        "Paste an hz: line, or the whole received text around it. \
-                         Ctrl+Enter decodes.",
-                    ),
-            );
+            let edit = ui
+                .add(
+                    egui::TextEdit::multiline(&mut self.incoming)
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text(
+                            "Paste an hz: line, or the whole received text around it. \
+                             Ctrl+Enter decodes.",
+                        ),
+                )
+                .labelled_by(label.id);
             if edit.changed() {
-                self.decoded = None;
-                self.redecode = None;
-            }
-            if shortcut && edit.has_focus() && !self.incoming.trim().is_empty() && !self.decoding {
-                self.decode();
+                self.forget_decode();
             }
         }
         let ready = self.incoming_file.is_some() || !self.incoming.trim().is_empty();
+        if shortcut && ready && !self.decoding {
+            self.decode();
+        }
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ready && !self.decoding, egui::Button::new("Decode"))
@@ -662,6 +736,15 @@ impl App {
             Some(Ok(d)) => {
                 let info = logic::received_summary(d.mode, d.bytes, d.model.as_deref());
                 ui.label(RichText::new(info).weak());
+                if d.text.as_bytes() != d.raw {
+                    ui.label(
+                        RichText::new(
+                            "Some of the bytes aren't text and show as \u{fffd}; \
+                             Save text writes them as they were sent.",
+                        )
+                        .weak(),
+                    );
+                }
                 // a &str buffer can be selected and copied but not edited
                 ui.add(
                     egui::TextEdit::multiline(&mut d.text.as_str())
@@ -680,7 +763,7 @@ impl App {
                             .set_file_name("message.txt")
                             .save_file()
                         {
-                            let saved = std::fs::write(&path, d.text.as_bytes());
+                            let saved = std::fs::write(&path, &d.raw);
                             self.note = Some((
                                 match saved {
                                     Ok(()) => format!("Saved {}", path.display()),
@@ -706,6 +789,26 @@ impl App {
             None => {}
         }
     }
+}
+
+fn download_label(name: &str) -> String {
+    match name {
+        "smollm2-135m" => "Download (137 MB)".into(),
+        "smollm2-360m" => "Download (365 MB)".into(),
+        _ => "Download".into(),
+    }
+}
+
+/// Reads a file the user picked, refusing anything bigger than a message can be.
+fn read_small(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let too_big = std::fs::metadata(path).is_ok_and(|m| m.len() > 1 << 20);
+    if too_big {
+        return Err(format!(
+            "{} is over 1 MiB, more than a hamzip message can hold",
+            path.display()
+        ));
+    }
+    std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))
 }
 
 fn error_label(ui: &mut egui::Ui, s: String) {
@@ -858,11 +961,23 @@ fn style(ctx: &egui::Context) {
     }
 }
 
-fn main() -> eframe::Result {
+/// Without a console, a startup failure or panic would otherwise vanish.
+fn show_fatal(message: &str) {
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("hamzip")
+        .set_description(message)
+        .show();
+}
+
+fn main() {
     if std::env::args().any(|a| a == "--version") {
         println!("hamzip-gui {}", hamzip::VERSION);
-        return Ok(());
+        return;
     }
+    std::panic::set_hook(Box::new(|info| {
+        show_fatal(&format!("hamzip stopped because of a bug: {info}"));
+    }));
     net::clean_old_exe();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -872,12 +987,19 @@ fn main() -> eframe::Result {
             .with_icon(Arc::new(icon())),
         ..Default::default()
     };
-    eframe::run_native(
+    let run = eframe::run_native(
         "hamzip",
         options,
         Box::new(|cc| {
             style(&cc.egui_ctx);
             Ok(Box::new(App::new(cc.egui_ctx.clone())))
         }),
-    )
+    );
+    if let Err(e) = run {
+        show_fatal(&format!(
+            "hamzip couldn't open its window: {e}. It needs OpenGL 2 or newer, which some \
+             remote desktop sessions don't provide; the hamzip command line still works."
+        ));
+        std::process::exit(1);
+    }
 }

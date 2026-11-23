@@ -486,6 +486,15 @@ mod tests {
     }
 
     #[test]
+    fn framing_is_what_a_message_adds_to_its_body() {
+        let raw = compress(None, None, b"QSL 73");
+        assert_eq!(mode_of(&raw).unwrap(), Mode::Raw);
+        assert_eq!(raw.len() - b"QSL 73".len(), Mode::Raw.framing());
+        // model mode also carries the two model id bytes
+        assert_eq!(Mode::Model.framing(), Mode::Raw.framing() + 2);
+    }
+
+    #[test]
     fn a_message_for_the_other_published_model_names_it() {
         let m = test_model();
         let other = id_of(MODELS[1].1);

@@ -3,6 +3,44 @@
 
 use hamzip::Mode;
 
+/// Tracks a background job whose input keeps changing: only the result for
+/// the latest input is shown, and at most one job runs at a time, started once
+/// more with the latest input if it changed meanwhile.
+#[derive(Default)]
+pub struct Latest {
+    generation: u64,
+    running: bool,
+    rerun: bool,
+}
+
+impl Latest {
+    /// The input changed, so a result still on its way is out of date.
+    pub fn changed(&mut self) {
+        self.generation += 1;
+    }
+
+    /// The generation to start a job for, or None when one is already running;
+    /// the input is then picked up when that one finishes.
+    pub fn start(&mut self) -> Option<u64> {
+        if self.running {
+            self.rerun = true;
+            return None;
+        }
+        self.running = true;
+        Some(self.generation)
+    }
+
+    /// A job finished: whether to show its result, and whether to start again.
+    pub fn finish(&mut self, generation: u64) -> (bool, bool) {
+        self.running = false;
+        (self.is_current(generation), std::mem::take(&mut self.rerun))
+    }
+
+    pub fn is_current(&self, generation: u64) -> bool {
+        generation == self.generation
+    }
+}
+
 /// Link speeds offered for the airtime estimate, in bits per second.
 pub const RATES: [u32; 5] = [300, 1200, 2400, 4800, 9600];
 
@@ -41,8 +79,8 @@ impl Stats {
 pub fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Model => "coded with the model",
-        Mode::Zstd => "zstd, because the model didn't help here",
-        Mode::Raw => "as plain text, too short to compress",
+        Mode::Zstd => "zstd, smaller here than the model, or the text is too long for it",
+        Mode::Raw => "as plain text, which came out smallest",
     }
 }
 
@@ -107,6 +145,8 @@ mod tests {
         let s = Stats::new(text, &msg).unwrap();
         assert_eq!(s.chars, 17);
         assert_eq!(s.text_bytes, 18);
+        // per character, not per byte
+        assert!((s.bits_per_char() - msg.len() as f64 * 8.0 / 17.0).abs() < 1e-9);
         assert!((s.percent_of_text() - 100.0 * msg.len() as f64 / 18.0).abs() < 1e-9);
     }
 
@@ -120,17 +160,47 @@ mod tests {
     #[test]
     fn durations_read_naturally() {
         assert_eq!(format_seconds(0.43), "0.4 s");
+        assert_eq!(format_seconds(9.94), "9.9 s");
+        assert_eq!(format_seconds(10.0), "10 s");
         assert_eq!(format_seconds(42.4), "42 s");
+        assert_eq!(format_seconds(59.4), "59 s");
+        assert_eq!(format_seconds(60.0), "1 min 0 s");
         assert_eq!(format_seconds(125.0), "2 min 5 s");
         assert_eq!(format_bytes(512), "512 bytes");
+        assert_eq!(format_bytes(999_999), "999999 bytes");
+        assert_eq!(format_bytes(1_000_000), "1 MB");
         assert_eq!(format_bytes(137_105_551), "137 MB");
     }
 
     #[test]
-    fn every_mode_has_a_label_that_says_why() {
+    fn every_mode_has_its_own_label() {
         assert!(mode_label(Mode::Model).contains("model"));
-        assert!(mode_label(Mode::Zstd).contains("didn't help"));
-        assert!(mode_label(Mode::Raw).contains("too short"));
+        assert!(mode_label(Mode::Zstd).starts_with("zstd"));
+        assert!(mode_label(Mode::Raw).contains("plain text"));
+    }
+
+    #[test]
+    fn a_result_for_text_since_edited_is_not_shown() {
+        let mut jobs = Latest::default();
+        let first = jobs.start().unwrap();
+        jobs.changed();
+        // still running, so the new text waits for it
+        assert_eq!(jobs.start(), None);
+        assert_eq!(jobs.finish(first), (false, true));
+        let second = jobs.start().unwrap();
+        assert_eq!(jobs.finish(second), (true, false));
+        // nothing is running now, so the next edit starts at once
+        jobs.changed();
+        assert!(jobs.start().is_some());
+    }
+
+    #[test]
+    fn an_edit_after_the_last_job_makes_its_result_stale() {
+        let mut jobs = Latest::default();
+        let done = jobs.start().unwrap();
+        assert_eq!(jobs.finish(done), (true, false));
+        jobs.changed();
+        assert!(!jobs.is_current(done));
     }
 
     #[test]
@@ -142,6 +212,10 @@ mod tests {
         assert_eq!(
             received_summary(Mode::Raw, 11, None),
             "Sent as plain text, 11 bytes on air"
+        );
+        assert_eq!(
+            received_summary(Mode::Zstd, 40, None),
+            "Sent as zstd, 40 bytes on air"
         );
     }
 }
