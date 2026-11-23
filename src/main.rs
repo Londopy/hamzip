@@ -365,7 +365,7 @@ fn run(cli: &Cli) -> Result<(), Error> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    net::clean_old_exe();
+    net::clean_old_exe("hamzip");
     let notice = match cli.cmd {
         Cmd::Upgrade { .. } => None,
         _ => upgrade::start_notice(&store::data_dir()),

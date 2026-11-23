@@ -176,7 +176,10 @@ impl App {
 
     fn load(&mut self, name: &'static str) {
         // the file isn't there until the download finishes, which then loads it
-        if self.models.contains_key(name) || self.downloading(name) {
+        if self.models.contains_key(name)
+            || self.downloading(name)
+            || matches!(self.status.get(name), Some(Status::Loading))
+        {
             return;
         }
         if store::find_installed(name).is_none() {
@@ -196,7 +199,11 @@ impl App {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.spawn(move || {
             let mut last = Instant::now();
-            let got = net::download_model(name, &store::data_dir(), &mut |n, total| {
+            // replace a damaged copy where it is, since that's where loading looks first
+            let dir = store::find_installed(name)
+                .and_then(|p| p.parent().map(PathBuf::from))
+                .unwrap_or_else(store::data_dir);
+            let got = net::download_model(name, &dir, &mut |n, total| {
                 if last.elapsed() > Duration::from_millis(100) {
                     last = Instant::now();
                     let _ = tx.send(Done::Progress(name, n, total));
@@ -735,7 +742,7 @@ impl App {
         match &self.decoded {
             Some(Ok(d)) => {
                 let info = logic::received_summary(d.mode, d.bytes, d.model.as_deref());
-                ui.label(RichText::new(info).weak());
+                let summary = ui.label(RichText::new(info).weak());
                 if d.text.as_bytes() != d.raw {
                     ui.label(
                         RichText::new(
@@ -751,7 +758,8 @@ impl App {
                         .desired_rows(8)
                         .desired_width(f32::INFINITY)
                         .background_color(ui.visuals().extreme_bg_color),
-                );
+                )
+                .labelled_by(summary.id);
                 ui.horizontal(|ui| {
                     if ui.button("Copy text").clicked() {
                         self.ctx.copy_text(d.text.clone());
@@ -804,7 +812,7 @@ fn read_small(path: &std::path::Path) -> Result<Vec<u8>, String> {
     let too_big = std::fs::metadata(path).is_ok_and(|m| m.len() > 1 << 20);
     if too_big {
         return Err(format!(
-            "{} is over 1 MiB, more than a hamzip message can hold",
+            "{} is over 1 MiB, too long to send as one message",
             path.display()
         ));
     }
@@ -963,6 +971,8 @@ fn style(ctx: &egui::Context) {
 
 /// Without a console, a startup failure or panic would otherwise vanish.
 fn show_fatal(message: &str) {
+    // on Linux the dialog needs zenity and a display; the terminal may be all there is
+    eprintln!("hamzip-gui: {message}");
     rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
         .set_title("hamzip")
@@ -978,7 +988,7 @@ fn main() {
     std::panic::set_hook(Box::new(|info| {
         show_fatal(&format!("hamzip stopped because of a bug: {info}"));
     }));
-    net::clean_old_exe();
+    net::clean_old_exe("hamzip-gui");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("hamzip")

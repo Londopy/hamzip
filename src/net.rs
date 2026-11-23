@@ -210,25 +210,34 @@ fn replace_with_probe(fetched: &[Fetched], probe: &[&str]) -> Result<(), Error> 
     for (f, s) in fetched.iter().zip(&staged) {
         let old = old_path(&f.path);
         let _ = std::fs::remove_file(&old);
-        let moved = std::fs::rename(&f.path, &old).and_then(|_| {
-            std::fs::rename(s, &f.path).inspect_err(|_| {
-                let _ = std::fs::rename(&old, &f.path);
-            })
-        });
-        if let Err(e) = moved {
-            let mut back = Vec::new();
+        // the error, and whether the program is still (or again) at its path
+        let moved = match std::fs::rename(&f.path, &old) {
+            Err(e) => Err((e, true)),
+            Ok(()) => {
+                std::fs::rename(s, &f.path).map_err(|e| (e, std::fs::rename(&old, &f.path).is_ok()))
+            }
+        };
+        if let Err((e, intact)) = moved {
+            let mut lost: Vec<&Path> = if intact { Vec::new() } else { vec![&f.path] };
             for p in swapped.iter().rev() {
                 let restored =
                     std::fs::remove_file(p).and_then(|_| std::fs::rename(old_path(p), p));
                 if restored.is_err() {
-                    back.push(p.display().to_string());
+                    lost.push(p);
                 }
             }
             unstage();
-            let changed = if back.is_empty() {
+            let changed = if lost.is_empty() {
                 "Nothing was changed".to_string()
             } else {
-                format!("Putting back the old {} failed too", back.join(" and "))
+                let fixes: Vec<String> = lost
+                    .iter()
+                    .map(|p| format!("rename {} to {}", old_path(p).display(), p.display()))
+                    .collect();
+                format!(
+                    "Putting the old programs back failed too; {} yourself",
+                    fixes.join(" and ")
+                )
             };
             return Err(Error::Io(format!(
                 "could not replace {}: {e}. {changed}",
@@ -270,10 +279,11 @@ pub fn old_path(exe: &Path) -> PathBuf {
     exe.with_extension("old")
 }
 
-/// Deletes the copies an upgrade left behind, once the new programs are running.
-pub fn clean_old_exe() {
+/// Deletes the copies an upgrade left behind, once the new programs are
+/// running. `own` is the running program's name, as for `programs_beside`.
+pub fn clean_old_exe(own: &'static str) {
     if let Ok(exe) = std::env::current_exe() {
-        for (path, _) in programs_beside(&exe, "hamzip") {
+        for (path, _) in programs_beside(&exe, own) {
             let _ = std::fs::remove_file(old_path(&path));
         }
     }
@@ -484,7 +494,7 @@ mod tests {
             programs_beside(&portable, "hamzip-gui"),
             vec![(exe("hamzip"), "hamzip"), (portable, "hamzip-gui")]
         );
-        // a second copy of the running program's own kind is left alone
+        // from the command line, the window beside it is upgraded first
         std::fs::write(exe("hamzip-gui"), b"x").unwrap();
         assert_eq!(
             programs_beside(&exe("hamzip"), "hamzip"),
@@ -595,6 +605,42 @@ mod tests {
             assert_eq!(std::fs::read(old_path(p)).unwrap(), old);
             assert!(!p.with_extension("new").exists());
         }
+    }
+
+    #[test]
+    fn replace_all_puts_back_what_it_moved_when_a_later_swap_fails() {
+        let dir = temp_dir("undo");
+        let (cli, gui) = (dir.join("hamzip.exe"), dir.join("hamzip-gui.exe"));
+        std::fs::write(&cli, b"old cli").unwrap();
+        std::fs::write(&gui, b"old gui").unwrap();
+        // a folder where the window's old copy would go makes its swap fail
+        std::fs::create_dir_all(old_path(&gui).join("keep")).unwrap();
+        std::fs::write(old_path(&gui).join("keep").join("f"), b"x").unwrap();
+        let new = runnable();
+        let fetched = [&cli, &gui].map(|p| Fetched {
+            path: p.clone(),
+            bytes: new.clone(),
+        });
+        let err = replace_with_probe(&fetched, &["--list"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Nothing was changed"), "{err}");
+        assert_eq!(std::fs::read(&cli).unwrap(), b"old cli");
+        assert_eq!(std::fs::read(&gui).unwrap(), b"old gui");
+        assert!(!old_path(&cli).exists());
+        assert!(!cli.with_extension("new").exists() && !gui.with_extension("new").exists());
+    }
+
+    #[test]
+    fn programs_beside_the_window_include_the_command_line() {
+        let dir = temp_dir("window");
+        let exe = |n: &str| dir.join(format!("{n}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(exe("hamzip"), b"x").unwrap();
+        std::fs::write(exe("hamzip-gui"), b"x").unwrap();
+        assert_eq!(
+            programs_beside(&exe("hamzip-gui"), "hamzip-gui"),
+            vec![(exe("hamzip"), "hamzip"), (exe("hamzip-gui"), "hamzip-gui")]
+        );
     }
 
     #[test]
