@@ -14,12 +14,13 @@
       - verifies it against the release's SHA256SUMS.txt and refuses on a mismatch
       - x64: runs the setup.exe silently (per-user, no admin prompt)
       - x86 / arm64, or -Msi: runs the .msi instead
-      - -Portable: no installer, just hamzip.exe in a folder
+      - -Portable: no installer, just hamzip.exe and hamzip-gui.exe in a folder
 
-    hamzip is a command-line tool, so there is no shortcut to it: you run it
-    from a terminal. The setup.exe and the MSI put it on your PATH; with
-    -Portable, add -AddToPath for that. Either way, get the shared model
-    afterwards with `hamzip model download`.
+    The setup.exe and the MSI install both programs: the window, hamzip-gui,
+    as "hamzip" in the Start menu, and the command line, hamzip, on your PATH.
+    -Portable makes no shortcut, and puts the folder on PATH only with
+    -AddToPath. Get the shared model afterwards from the window, or with
+    `hamzip model download`.
 
 .PARAMETER Version
     Install this version (for example 1.2.3) instead of the latest.
@@ -28,7 +29,8 @@
 .PARAMETER AllUsers
     Install for every user on this PC (asks for admin).
 .PARAMETER Portable
-    Skip the installer: put hamzip.exe in -Dir.
+    Skip the installer: put hamzip.exe, and hamzip-gui.exe when the release
+    has one for this PC, in -Dir.
 .PARAMETER Dir
     Folder for -Portable. Default: %LOCALAPPDATA%\Programs\hamzip
 .PARAMETER AddToPath
@@ -101,8 +103,10 @@ function Get-ChecksumTable {
 function Select-Download {
     param($Names, [string]$Arch, [bool]$WantMsi, [bool]$WantPortable)
     if ($WantPortable) {
-        $exe = $Names | Where-Object { $_ -like "*-$Arch-portable.exe" } | Select-Object -First 1
-        if ($exe) { return @{ Kind = 'exe'; Name = $exe } }
+        # anchored on the program, since the window's exes end the same way
+        $exe = $Names | Where-Object { $_ -like "$AppName-v*-$Arch-portable.exe" } | Select-Object -First 1
+        $gui = $Names | Where-Object { $_ -like "$AppName-gui-v*-$Arch-portable.exe" } | Select-Object -First 1
+        if ($exe) { return @{ Kind = 'exe'; Name = $exe; Gui = $gui } }
         return $null
     }
     # the setup.exe is x64 only; other CPUs (and -Msi) get the msi
@@ -162,11 +166,15 @@ function Install-App {
     if (-not $pick) {
         throw "$($release.tag_name) has no download for this PC ($arch). See https://github.com/$Repo/releases"
     }
-    Write-Host "$AppName $($release.tag_name) for $arch -> $($pick.Name)"
+    $what = $pick.Name
+    if ($pick.Gui) { $what += " and $($pick.Gui)" }
+    Write-Host "$AppName $($release.tag_name) for $arch -> $what"
     if ($DryRun) { return $pick }
 
     $sums = Get-ChecksumTable -Release $release
     $file = Save-Verified -Release $release -Name $pick.Name -Sums $sums
+    $guiFile = $null
+    if ($pick.Gui) { $guiFile = Save-Verified -Release $release -Name $pick.Gui -Sums $sums }
 
     switch ($pick.Kind) {
         'setup' {
@@ -191,11 +199,21 @@ function Install-App {
             $dest = Join-Path $target "$AppName.exe"
             Copy-Item -Path $file -Destination $dest -Force
             Write-Host "Installed to $dest"
+            if ($guiFile) {
+                $guiDest = Join-Path $target "$AppName-gui.exe"
+                Copy-Item -Path $guiFile -Destination $guiDest -Force
+                Write-Host "Installed the window to $guiDest"
+            }
             if ($AddToPath) { Add-UserPath -Folder $target }
         }
     }
     Remove-Item -Path $file -Force -ErrorAction SilentlyContinue
+    if ($guiFile) { Remove-Item -Path $guiFile -Force -ErrorAction SilentlyContinue }
     Write-Host "$AppName $($release.tag_name) is installed."
+    # older releases (-Version) have no window
+    if ($pick.Kind -ne 'exe' -and ($names -like "$AppName-gui-*")) {
+        Write-Host "Open the window from the Start menu (hamzip); it can download the shared model too."
+    }
     if ($pick.Kind -eq 'exe' -and -not $AddToPath) {
         Write-Host "$AppName isn't on your PATH (run this again with -AddToPath for that). Get the shared model (137 MB) with: & '$dest' model download"
     } else {

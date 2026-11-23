@@ -47,20 +47,31 @@ INTRO = (
 
 # (regex on the file name, who it's for, notes). first match wins.
 KINDS = [
-    (r"-setup-x64\.exe$", "Windows 10/11, 64-bit", "**installer (recommended)**, per-user, no admin prompt; puts hamzip on PATH"),
-    (r"-x64\.msi$", "Windows 10/11, 64-bit", "MSI; per-user by default, all-users for IT; puts hamzip on PATH"),
+    (r"-setup-x64\.exe$", "Windows 10/11, 64-bit",
+     "**installer (recommended)**, per-user, no admin prompt; the window in the Start menu, hamzip on PATH"),
+    (r"-x64\.msi$", "Windows 10/11, 64-bit",
+     "MSI; per-user by default, all-users for IT; the window in the Start menu, hamzip on PATH"),
     (r"-x86\.msi$", "Windows, 32-bit", "MSI"),
     (r"-arm64\.msi$", "Windows on ARM", "MSI"),
-    (r"-x64-portable\.exe$", "Windows, 64-bit", "one exe, nothing to install"),
-    (r"-x86-portable\.exe$", "Windows, 32-bit", "one exe, nothing to install"),
-    (r"-arm64-portable\.exe$", "Windows on ARM", "one exe, nothing to install"),
-    (r"-portable\.zip$", "Windows (all three)", "x64, x86 and arm64 folders; the model stays next to the exe"),
+    # anchored on the program, since the window's files end the same way
+    (r"^hamzip-v.*-x64-portable\.exe$", "Windows, 64-bit", "the command line, one exe, nothing to install"),
+    (r"^hamzip-v.*-x86-portable\.exe$", "Windows, 32-bit", "the command line, one exe, nothing to install"),
+    (r"^hamzip-v.*-arm64-portable\.exe$", "Windows on ARM", "the command line, one exe, nothing to install"),
+    (r"^hamzip-gui-v.*-x64-portable\.exe$", "Windows, 64-bit", "the window, one exe, nothing to install"),
+    (r"^hamzip-gui-v.*-x86-portable\.exe$", "Windows, 32-bit", "the window, one exe, nothing to install"),
+    (r"^hamzip-gui-v.*-arm64-portable\.exe$", "Windows on ARM", "the window, one exe, nothing to install"),
+    (r"-portable\.zip$", "Windows (all three)", "both programs in x64, x86 and arm64 folders; the model stays next to them"),
     (r"^install\.ps1$", "Windows PowerShell", "script install, picks the right build and checks it"),
     (r"^install\.cmd$", "Windows", "double-click version of install.ps1"),
     # built on Ubuntu 22.04 (see release.yml), so they need that glibc or newer
-    (r"-linux-x86_64$", "Linux, x86_64", "one binary; `chmod +x` it; glibc 2.35 or newer"),
-    (r"-linux-aarch64$", "Linux on 64-bit ARM, 64-bit Raspberry Pi OS", "one binary; `chmod +x` it; glibc 2.35 or newer"),
-    (r"-linux-armv7$", "32-bit Raspberry Pi OS, Pi 2 or newer", "one binary; `chmod +x` it; glibc 2.35 or newer"),
+    (r"^hamzip-v.*-linux-x86_64$", "Linux, x86_64", "the command line, one binary; `chmod +x` it; glibc 2.35 or newer"),
+    (r"^hamzip-v.*-linux-aarch64$", "Linux on 64-bit ARM, 64-bit Raspberry Pi OS",
+     "the command line, one binary; `chmod +x` it; glibc 2.35 or newer"),
+    (r"^hamzip-v.*-linux-armv7$", "32-bit Raspberry Pi OS, Pi 2 or newer",
+     "the command line, one binary; `chmod +x` it; glibc 2.35 or newer"),
+    (r"^hamzip-gui-v.*-linux-x86_64$", "Linux desktop, x86_64", "the window, one binary; `chmod +x` it; glibc 2.35 or newer"),
+    (r"^hamzip-gui-v.*-linux-aarch64$", "Linux desktop on 64-bit ARM, 64-bit Raspberry Pi OS",
+     "the window, one binary; `chmod +x` it; glibc 2.35 or newer"),
 ]
 # in SHA256SUMS.txt, but not rows of their own in the download table
 HIDDEN = re.compile(r"(\.torrent|\.magnet\.png|^SHA256SUMS\.txt)$")
@@ -235,9 +246,12 @@ def main():
     def find(pattern):
         return next((f for f, _, _ in sums if re.search(pattern, f)), None)
 
-    setup, msi, portable_exe, zip_name = (find(r"-setup-x64\.exe$"), find(r"-x64\.msi$"),
-                                         find(r"-x64-portable\.exe$"), find(r"-portable\.zip$"))
-    linux = [f for f, _, _ in sums if re.search(r"-linux-(x86_64|aarch64|armv7)$", f)]
+    setup, msi, portable_exe, gui_exe, zip_name = (find(r"-setup-x64\.exe$"), find(r"-x64\.msi$"),
+                                                  find(r"^hamzip-v.*-x64-portable\.exe$"),
+                                                  find(r"^hamzip-gui-v.*-x64-portable\.exe$"),
+                                                  find(r"-portable\.zip$"))
+    linux = [f for f, _, _ in sums if re.search(r"^hamzip-v.*-linux-(x86_64|aarch64|armv7)$", f)]
+    linux_gui = [f for f, _, _ in sums if re.search(r"^hamzip-gui-v.*-linux-(x86_64|aarch64)$", f)]
 
     # 3. the body
     title = f"{APP} {tag}" + (f" — {rel_name}" if rel_name else "")
@@ -253,26 +267,31 @@ def main():
             continue
         label, note = kind_of(f)
         out.append(f"| [`{f}`]({download}/{f}) | {label} | {human(size)} | {note} |")
-    out += ["", f"Already have {APP}? `hamzip upgrade` installs this version: it asks first, and checks the "
-            "SHA-256 against `SHA256SUMS.txt` before it replaces anything.", ""]
+    out += ["", f"Already have {APP}? `hamzip upgrade` (it asks first) or **Install update** in the window replaces "
+            "hamzip and hamzip-gui, whichever are in that folder, with this version. Every download is checked "
+            "against `SHA256SUMS.txt` before anything is replaced.", ""]
 
     out += ["## Install", ""]
     if setup:
         out += [f"**Installer (recommended):** download [`{setup}`]({download}/{setup}) and run it. It installs for "
-                "your user only, so there is no admin prompt, and puts `hamzip` on your PATH. "
+                "your user only, so there is no admin prompt. The window, hamzip-gui, goes in the Start menu and on "
+                "the desktop as **hamzip**, and the `hamzip` command on your PATH. "
                 "The binaries are not code-signed: if SmartScreen says "
                 "\"Windows protected your PC\", click **More info**, then **Run anyway**.", ""]
     if msi:
-        out += [f"**MSI:** [`{msi}`]({download}/{msi}) (also x86 and arm64). Per-user by default, and it puts hamzip "
-                "on your PATH (`ADDTOPATH=0` skips that). For every user on "
+        out += [f"**MSI:** [`{msi}`]({download}/{msi}) (also x86 and arm64). Per-user by default, with the same "
+                "shortcuts to the window, and it puts hamzip on your PATH (`DESKTOPSHORTCUT=0` and `ADDTOPATH=0` "
+                "skip the desktop icon and the PATH entry). For every user on "
                 f"the PC (admin): `msiexec /i {msi} ALLUSERS=2 MSIINSTALLPERUSER=\"\"`.", ""]
-    if portable_exe or zip_name:
+    if portable_exe or gui_exe or zip_name:
         bits = []
         if portable_exe:
-            bits.append(f"[`{portable_exe}`]({download}/{portable_exe}) is the whole program in one exe")
+            bits.append(f"[`{portable_exe}`]({download}/{portable_exe}) is the command line in one exe")
+        if gui_exe:
+            bits.append(f"[`{gui_exe}`]({download}/{gui_exe}) is the window")
         if zip_name:
-            bits.append(f"[`{zip_name}`]({download}/{zip_name}) has all three Windows builds and keeps the model "
-                        "next to the exe")
+            bits.append(f"[`{zip_name}`]({download}/{zip_name}) has both programs for x64, x86 and arm64 and "
+                        "keeps the model next to them")
         out += ["**Portable:** " + "; ".join(bits) + ".", ""]
     out += ["**PowerShell:** picks the right build for your PC, checks it, and installs it:", "",
             "```powershell", f"irm https://github.com/{a.repo}/releases/latest/download/install.ps1 | iex", "```", ""]
@@ -291,9 +310,14 @@ def main():
                 "the model:", "",
                 "```sh", "arch=aarch64   # or x86_64, armv7", f"curl -LO {download}/{name}", f"chmod +x {name}",
                 f"sudo mv {name} /usr/local/bin/hamzip", "hamzip model download", "```", ""]
-    out += ["**Then get the model**, on every platform: none of the downloads include it. In a new terminal, run "
-            "`hamzip model download`. It fetches `smollm2-135m.hzm` (137 MB) once and keeps it only if its SHA-256 "
-            "matches the one built into hamzip. After that, hamzip doesn't need a connection.", ""]
+    if linux_gui:
+        gui_name = re.sub(r"(x86_64|aarch64)$", "$arch", linux_gui[0])
+        out += [f"On a Linux desktop, `{gui_name}` is the window (`x86_64` and `aarch64` only; 32-bit Raspberry Pi "
+                "OS gets the command line). Install it the same way, as `/usr/local/bin/hamzip-gui`.", ""]
+    out += ["**Then get the model**, on every platform: none of the downloads include it. Click **Download** in "
+            "the window, or run `hamzip model download` in a new terminal. Either fetches `smollm2-135m.hzm` "
+            "(137 MB) once and keeps it only if its SHA-256 matches the one built into hamzip. After that, hamzip "
+            "doesn't need a connection.", ""]
 
     out += ["## Verify a download", "",
             "`SHA256SUMS.txt` lists the SHA-256 of every file on this release. In PowerShell, next to the download:", "",

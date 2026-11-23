@@ -44,6 +44,21 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # what eframe's README lists for building on Linux
+      - name: Install the window's build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
+      # default-members keeps the window out of plain clippy and test. Its
+      # tests need no model and no display.
+      - name: Clippy (window)
+        run: cargo clippy -p hamzip-gui --all-targets -- -D warnings
+
+      - name: Test the window
+        run: cargo test -p hamzip-gui
+
       # The tests need the 137 MB model, which isn't in the repo. The key is its
       # SHA-256 (the first entry of MODELS in src/lib.rs), so a new model gets a new
       # cache, and the cache is only saved when the job passes, which needs the

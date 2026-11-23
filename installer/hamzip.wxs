@@ -6,31 +6,34 @@
     wix build -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
               -d Version=1.2.3 -d BinDir=..\target\x86_64-pc-windows-msvc\release
               -o hamzip-1.2.3-x64.msi installer\hamzip.wxs
-  The workflow also writes installer\license.rtf from LICENSE-MIT first
-  (WixUI shows the license from an RTF file). hamzip is MIT OR Apache-2.0;
-  both installers show the MIT text.
+  BinDir holds both hamzip.exe and hamzip-gui.exe. The workflow also writes
+  installer\license.rtf from LICENSE-MIT first (WixUI shows the license from an
+  RTF file). hamzip is MIT OR Apache-2.0; both installers show the MIT text.
 
   One-time WiX setup on a dev machine: see windows-installer.md in the
   londopy-style skill (dotnet tool, two extensions, EULA acceptance).
   XML comments can't contain two hyphens in a row, so the commands live there.
 
-  hamzip is a command-line tool, so unlike the GUI apps' MSI this one has no
-  shortcuts, no startup entry and no "Launch" checkbox. Instead it puts the
-  install folder on PATH, on by default (the PATH fragment from wix-path.wxs,
-  in WiX v4+ syntax).
+  Installs both programs in one folder: hamzip.exe, the command line, and
+  hamzip-gui.exe, the window, which the Start menu and desktop shortcuts (named
+  "hamzip") open. The install folder goes on PATH, on by default, because a
+  terminal is the only way to use the command line (the PATH fragment from
+  wix-path.wxs, in WiX v4+ syntax). No startup entry: the window has no reason
+  to run all the time.
 
   Install scope: per-user by default (no UAC, %LOCALAPPDATA%\Programs\hamzip,
   same folder as the Inno setup.exe). IT admins install machine-wide with:
     msiexec /i hamzip-<ver>-x64.msi ALLUSERS=2 MSIINSTALLPERUSER=""
-  Optional msiexec property: ADDTOPATH=0 leaves PATH alone. The PATH entry
-  goes into the installing user's environment (HKCU) even for a machine-wide
-  install, so for every user IT adds the Program Files folder to the system
-  PATH itself.
+  Optional msiexec properties: DESKTOPSHORTCUT=0 skips the desktop icon, and
+  ADDTOPATH=0 leaves PATH alone. The PATH entry goes into the installing user's
+  environment (HKCU) even for a machine-wide install, so for every user IT adds
+  the Program Files folder to the system PATH itself.
 
   Don't install the MSI and the setup.exe side by side; they share a folder.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <!-- the workflow passes -d Version=<numeric version>; MSI versions must be
        plain numbers, so prerelease suffixes like -rc1 are stripped first -->
@@ -62,21 +65,39 @@
     <Property Id="ARPHELPLINK" Value="https://github.com/Londopy/hamzip/issues" />
     <Property Id="ARPURLUPDATEINFO" Value="https://github.com/Londopy/hamzip/releases" />
 
-    <!-- option for msiexec: ADDTOPATH=0 skips the PATH entry. Secure so it
-         survives into the elevated part of an all-users install. -->
+    <!-- options for msiexec: DESKTOPSHORTCUT=0 skips the desktop icon and
+         ADDTOPATH=0 the PATH entry. Secure so they survive into the elevated
+         part of an all-users install. -->
+    <Property Id="DESKTOPSHORTCUT" Value="1" Secure="yes" />
     <Property Id="ADDTOPATH" Value="1" Secure="yes" />
 
-    <!-- UI: license page + Install button. No "Launch" checkbox: there is no
-         window to launch -->
+    <!-- UI: license page + Install button, then a "Launch hamzip" checkbox
+         (checked) that opens the window -->
     <ui:WixUI Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch hamzip" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#GuiExe]" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction"
+               Value="Wix4ShellExec_$(sys.BUILDARCHSHORT)"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
 
-    <!-- No util:CloseApplication as in the GUI apps' MSI: Windows Installer's
-         own Restart Manager prompt asks to close a running hamzip instead of
-         killing it halfway through decoding a message. -->
+    <!-- close a running window before its exe is replaced or removed, like
+         CloseWindow() in the Inno script: WM_CLOSE first, then ended after 3
+         seconds. The command line is left to Windows Installer's own Restart
+         Manager prompt instead of being killed halfway through decoding a
+         message. -->
+    <util:CloseApplication Id="CloseWindow" Target="hamzip-gui.exe"
+                           CloseMessage="yes" TerminateProcess="1" Timeout="3"
+                           RebootPrompt="no" />
 
     <Feature Id="Main" Title="hamzip" Level="1">
       <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="GuiExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
       <ComponentRef Id="PathEntry" />
     </Feature>
 
@@ -85,12 +106,17 @@
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="hamzip">
 
+        <!-- an upgrade from either program renames each exe it replaces to
+             <name>.old, which that program deletes the next time it starts;
+             uninstall removes any still there -->
         <Component Id="MainExecutable">
           <File Id="MainExe" Source="$(var.BinDir)\hamzip.exe" KeyPath="yes" />
-          <!-- `hamzip upgrade` renames the running exe to hamzip.old and
-               deletes that the next time hamzip starts; uninstall removes one
-               that is still there -->
           <RemoveFile Id="RemoveUpgradeOld" Name="hamzip.old" On="uninstall" />
+        </Component>
+
+        <Component Id="GuiExecutable">
+          <File Id="GuiExe" Source="$(var.BinDir)\hamzip-gui.exe" KeyPath="yes" />
+          <RemoveFile Id="RemoveGuiUpgradeOld" Name="hamzip-gui.old" On="uninstall" />
         </Component>
 
         <!-- the install folder on PATH, unless ADDTOPATH=0. Part="last" appends
@@ -106,11 +132,34 @@
       </Directory>
     </StandardDirectory>
 
-    <!-- No install.ini marker: `hamzip upgrade` doesn't read one. In a folder it
-         can't write to (an all-users install) it says to get the new MSI.
+    <!-- the shortcuts open the window and sit directly in Start, no subfolder.
+         HKMU = HKCU for a per-user install, HKLM for all users; the value is
+         just the keypath. -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="StartMenuShortcut" Name="hamzip" Target="[#GuiExe]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Compress and decode messages for slow radio links" />
+        <RegistryValue Root="HKMU" Key="Software\Londopy\hamzip"
+                       Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Condition="DESKTOPSHORTCUT = 1">
+        <Shortcut Id="DesktopShortcut" Name="hamzip" Target="[#GuiExe]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Compress and decode messages for slow radio links" />
+        <RegistryValue Root="HKMU" Key="Software\Londopy\hamzip"
+                       Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- No install.ini marker: neither updater reads one. In a folder they
+         can't write to (an all-users install) they say to get the new MSI.
 
          The data folder (%LOCALAPPDATA%\hamzip, which holds the downloaded
-         model) is left alone, unlike the setup.exe's uninstall. A major upgrade
+         model) is left alone, as with the setup.exe. A major upgrade
          uninstalls the old version first, so a RemoveFile here would delete the
          137 MB model on every upgrade, and a station may have no internet to
          fetch it again.

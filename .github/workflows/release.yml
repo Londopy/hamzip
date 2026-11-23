@@ -9,14 +9,18 @@ name: Release
 #   hamzip-<ver>-setup-x64.exe                   Inno Setup installer (per-user, no UAC)
 #   hamzip-<ver>-{x64,x86,arm64}.msi             MSI (per-user default, all-users option)
 #   hamzip-v<ver>-{x64,x86,arm64}-portable.exe   single exe, no install
-#   hamzip-v<ver>-portable.zip                   hamzip/{x64,x86,arm64}/hamzip.exe
+#   hamzip-v<ver>-portable.zip                   hamzip/{x64,x86,arm64}/{hamzip,hamzip-gui}.exe
 #   hamzip-v<ver>-linux-{x86_64,aarch64,armv7}   the bare Linux binaries
 #   install.ps1, install.cmd                     script installs (irm ... | iex)
 # plus a .torrent and a magnet QR code (.magnet.png) per download, made by
 # scripts/release_notes.py, which also writes SHA256SUMS.txt and the notes.
-# `hamzip upgrade` (src/upgrade.rs) downloads the portable exes and the Linux
-# binaries by exactly these names, and install.ps1 looks for the rest; change
-# them together.
+# The window, hamzip-gui, ships beside hamzip: in the installers and the zip,
+# and on its own as hamzip-gui-v<ver>-{x64,x86,arm64}-portable.exe and
+# hamzip-gui-v<ver>-linux-{x86_64,aarch64}. There is none for armv7; 32-bit
+# Raspberry Pi OS gets the command line only.
+# `hamzip upgrade` and the window's updater (asset_name in src/net.rs) download
+# the portable exes and the Linux binaries by exactly these names, and
+# install.ps1 looks for the rest; change them together.
 # The model isn't built here. It sits on its own release, model-smollm2-135m,
 # uploaded once by hand: a rebuild on another machine may not give the same
 # bytes, and every station needs the identical file.
@@ -121,11 +125,17 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Stage exe
+      # built apart from hamzip.exe, so the window's dependencies can't switch
+      # on features in the command line's
+      - name: Build the window
+        run: cargo build --release --locked -p hamzip-gui --target ${{ matrix.target }}
+
+      - name: Stage exes
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "stage\${{ matrix.label }}" | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\hamzip.exe" "stage\${{ matrix.label }}\hamzip.exe"
+          Copy-Item "target\${{ matrix.target }}\release\hamzip-gui.exe" "stage\${{ matrix.label }}\hamzip-gui.exe"
 
       # The installer is x64 only; x86 and arm64 ship as MSIs and portable exes.
       - name: Install Inno Setup
@@ -200,10 +210,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64,  target: x86_64-unknown-linux-gnu,      os: ubuntu-22.04 }
+          - { arch: x86_64,  target: x86_64-unknown-linux-gnu,      os: ubuntu-22.04,     gui: true }
           # a native arm64 runner, so no cross toolchain
-          - { arch: aarch64, target: aarch64-unknown-linux-gnu,     os: ubuntu-22.04-arm }
-          # 32-bit Raspberry Pi OS; there is no armv7 runner, so this one is cross-compiled
+          - { arch: aarch64, target: aarch64-unknown-linux-gnu,     os: ubuntu-22.04-arm, gui: true }
+          # 32-bit Raspberry Pi OS; there is no armv7 runner, so this one is
+          # cross-compiled, and it gets the command line only
           - { arch: armv7,   target: armv7-unknown-linux-gnueabihf, os: ubuntu-22.04 }
     env:
       # only read by the armv7 build: link with the cross gcc, and build
@@ -230,21 +241,36 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
 
+      # what eframe's README lists for building on Linux
+      - name: Install the window's build dependencies
+        if: matrix.gui
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      # named here, with the version, because `hamzip upgrade` downloads this
-      # exact file. The executable bit doesn't survive the artifact upload, so
-      # users chmod +x it after downloading.
-      - name: Stage binary
+      - name: Build the window
+        if: matrix.gui
+        run: cargo build --release --locked -p hamzip-gui --target ${{ matrix.target }}
+
+      # named here, with the version, because `hamzip upgrade` and the window's
+      # updater download these exact files. The executable bit doesn't survive
+      # the artifact upload, so users chmod +x them after downloading.
+      - name: Stage binaries
         env:
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET: ${{ matrix.target }}
           ARCH: ${{ matrix.arch }}
+          GUI: ${{ matrix.gui }}
         run: |
           set -euo pipefail
           mkdir -p stage
           cp "target/$TARGET/release/hamzip" "stage/hamzip-$TAG-linux-$ARCH"
+          if [ "$GUI" = true ]; then
+            cp "target/$TARGET/release/hamzip-gui" "stage/hamzip-gui-$TAG-linux-$ARCH"
+          fi
           file stage/*
 
       - uses: actions/upload-artifact@v7
@@ -282,12 +308,14 @@ jobs:
           foreach ($arch in "x64", "x86", "arm64") {
             New-Item -ItemType Directory -Force -Path "$root\$arch" | Out-Null
             Copy-Item "artifacts\build-$arch\$arch\hamzip.exe" "$root\$arch\"
-            # empty "portable" marker: hamzip keeps the model and its data next
-            # to the exe instead of in %LOCALAPPDATA%\hamzip
+            Copy-Item "artifacts\build-$arch\$arch\hamzip-gui.exe" "$root\$arch\"
+            # empty "portable" marker: both programs keep the model and their
+            # data next to the exes instead of in %LOCALAPPDATA%\hamzip
             New-Item -ItemType File -Force -Path "$root\$arch\portable" | Out-Null
-            # the same exe on its own, for people who want one file and no
-            # install; `hamzip upgrade` downloads these
+            # the same exes on their own, for people who want one file and no
+            # install; `hamzip upgrade` and the window's updater download these
             Copy-Item "artifacts\build-$arch\$arch\hamzip.exe" "dist\hamzip-$tag-$arch-portable.exe"
+            Copy-Item "artifacts\build-$arch\$arch\hamzip-gui.exe" "dist\hamzip-gui-$tag-$arch-portable.exe"
           }
           Compress-Archive -Path $root -DestinationPath "dist\hamzip-$tag-portable.zip"
           Copy-Item artifacts\build-x64\*-setup-x64.exe dist\

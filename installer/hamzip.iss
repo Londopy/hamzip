@@ -2,21 +2,22 @@
 ;
 ; Built by the release workflow with
 ;   ISCC.exe /DAppVersion=1.0.0 installer\hamzip.iss
-; Run `cargo build --release` first so ..\target\release\hamzip.exe exists.
+; Run `cargo build --release` and `cargo build --release -p hamzip-gui` first
+; so ..\target\release\hamzip.exe and hamzip-gui.exe exist.
 ;
 ; Output: installer\output\hamzip-<version>-setup-x64.exe
 ;
-; hamzip is a command-line tool, so this is leaner than the GUI apps' script:
-; no desktop icon, no Start menu shortcut to the exe (a console window would
-; open and close at once), no startup entry and no "launch after install".
-; The one integration is putting hamzip on PATH, which is on by default here
-; because a terminal is the only way to use it.
+; Installs both programs in one folder: hamzip.exe, the command line, and
+; hamzip-gui.exe, the window, which the Start menu and desktop shortcuts
+; (named "hamzip") open. Putting hamzip on PATH is on by default, because a
+; terminal is the only way to use the command line. No startup entry: the
+; window has no reason to run all the time.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
 
-; Folder holding the built exe, relative to this script. CI passes
+; Folder holding the built exes, relative to this script. CI passes
 ; /DBinDir=..\target\x86_64-pc-windows-msvc\release when it builds with --target.
 #ifndef BinDir
   #define BinDir "..\target\release"
@@ -34,6 +35,7 @@
 #define AppPublisher "Londopy"
 #define AppURL       "https://github.com/Londopy/hamzip"
 #define AppExeName   "hamzip.exe"
+#define GuiExeName   "hamzip-gui.exe"
 
 [Setup]
 ; Unique GUID - do NOT reuse this for a different app.
@@ -54,7 +56,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 
 ; With lowest privileges {autopf} resolves to %LOCALAPPDATA%\Programs.
 DefaultDirName={autopf}\{#AppName}
-; The Start menu folder only holds the uninstall entry, so it can be skipped.
+; The Start menu folder holds the window's shortcut and the uninstall entry.
 DefaultGroupName={#AppName}
 AllowNoIcons=yes
 
@@ -82,8 +84,8 @@ WizardStyle=modern
 ChangesEnvironment=yes
 
 ; Restart Manager asks to close a running hamzip before its exe is replaced.
-; There's no forced taskkill as in the GUI apps' script: a running hamzip may
-; be halfway through decoding a message.
+; The command line is never killed by force, since it may be halfway through
+; decoding a message; the window is (CloseWindow below).
 CloseApplications=yes
 CloseApplicationsFilter=*.exe
 RestartApplications=no
@@ -99,32 +101,62 @@ VersionInfoCompany={#AppPublisher}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-; Checked by default, unlike the GUI apps' opt-in integrations: hamzip is
-; only usable from a terminal. Puts {app} on the user's PATH (the machine's
-; PATH for an all-users install). install.ps1's silent install gets it too.
+Name: "desktopicon"; \
+  Description: "{cm:CreateDesktopIcon}"; \
+  GroupDescription: "{cm:AdditionalIcons}"
+; Checked by default, unlike the GUI apps' opt-in integrations: the command
+; line is only usable from a terminal. Puts {app} on the user's PATH (the
+; machine's PATH for an all-users install). install.ps1's silent install gets
+; it too.
 Name: "addtopath"; \
   Description: "Add {#AppName} to the &PATH"; \
   GroupDescription: "Environment:"
 
 [Files]
-; Main binary - built before running iscc
+; Both programs - built before running iscc
 Source: "{#BinDir}\{#AppExeName}"; \
+  DestDir: "{app}"; \
+  Flags: ignoreversion
+Source: "{#BinDir}\{#GuiExeName}"; \
   DestDir: "{app}"; \
   Flags: ignoreversion
 
 [Icons]
-; Start menu: only the uninstall entry. hamzip runs in a terminal, so a
-; shortcut to the exe would just flash a console window.
+; The shortcuts open the window. The command line has none: it runs in a
+; terminal, so a shortcut to it would just flash a console window.
+Name: "{group}\{#AppName}"; Filename: "{app}\{#GuiExeName}"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#AppName}"; \
+  Filename: "{app}\{#GuiExeName}"; \
+  Tasks: desktopicon
+
+[Run]
+; Offer to open the window after install (user can uncheck)
+Filename: "{app}\{#GuiExeName}"; \
+  Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; \
+  Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; `hamzip upgrade` renames the running exe to hamzip.old and deletes that the
-; next time hamzip starts; remove one that is still there.
+; An upgrade from either program renames each exe it replaces to <name>.old,
+; which that program deletes the next time it starts; remove any still there.
 Type: files; Name: "{app}\hamzip.old"
+Type: files; Name: "{app}\hamzip-gui.old"
 ; The data folder (%LOCALAPPDATA%\hamzip, holding the 137 MB model) stays, as
 ; it does with the MSI: a station that reinstalls offline still has its model.
 
 [Code]
+// Windows can't replace or delete a running exe, and the window is often left
+// open. Forcing it closed loses nothing a normal close would keep: it saves
+// no state.
+procedure CloseWindow();
+var
+  ResultCode: Integer;
+begin
+  Exec('taskkill.exe', '/F /IM {#GuiExeName}', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+  Sleep(500);
+end;
+
 // PATH handling (from nexium): append {app} to the user's PATH, or the
 // machine's for an all-users install, and take it out again on uninstall.
 
@@ -181,12 +213,16 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if CurStep = ssInstall then
+    CloseWindow();
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('addtopath') then
     EnvAddPath(ExpandConstant('{app}'));
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  if CurUninstallStep = usUninstall then
+    CloseWindow();
   if CurUninstallStep = usPostUninstall then
     EnvRemovePath(ExpandConstant('{app}'));
 end;
