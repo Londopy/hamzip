@@ -55,7 +55,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ModelCmd,
     },
-    /// Replace this hamzip with the latest release, after checking its SHA-256
+    /// Replace this hamzip, and hamzip-gui beside it, with the latest release, after checking their SHA-256
     Upgrade {
         /// Only say whether a newer version exists
         #[arg(long)]

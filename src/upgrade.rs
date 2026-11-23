@@ -16,11 +16,17 @@ fn confirm(question: &str) -> bool {
 /// one, with the latest release's builds.
 pub fn upgrade(check_only: bool, yes: bool) -> Result<(), Error> {
     let rel = net::latest_release(Duration::from_secs(30))?;
+    let new = net::version_of(&rel.tag_name).ok_or_else(|| {
+        Error::Io(format!(
+            "latest release has a non-semver tag {}",
+            rel.tag_name
+        ))
+    })?;
     let cur = net::current();
-    let Some(new) = net::newer(&rel) else {
+    if new <= cur {
         println!("hamzip {cur} is up to date");
         return Ok(());
-    };
+    }
     println!(
         "hamzip {new} is available (you have {cur}): {}",
         rel.html_url
@@ -31,24 +37,23 @@ pub fn upgrade(check_only: bool, yes: bool) -> Result<(), Error> {
 
     let exe =
         std::env::current_exe().map_err(|e| Error::Io(format!("finding this executable: {e}")))?;
-    let mut programs = exe
-        .parent()
-        .map(net::installed_programs)
-        .unwrap_or_default();
-    // a portable copy may have been renamed, so the running exe is always included
-    if !programs.iter().any(|(p, _)| *p == exe) {
-        programs.retain(|(_, name)| *name != "hamzip");
-        programs.insert(0, (exe.clone(), "hamzip"));
-    }
+    let programs = net::programs_beside(&exe, "hamzip");
+    let fetched = net::fetch(&rel, &programs)?;
     let list: Vec<String> = programs
         .iter()
         .map(|(p, _)| p.display().to_string())
         .collect();
-    if !yes && !confirm(&format!("Replace {} with {new}?", list.join(" and "))) {
+    if !yes
+        && !confirm(&format!(
+            "Replace {} with hamzip {new}?",
+            list.join(" and ")
+        ))
+    {
         println!("not installed");
         return Ok(());
     }
-    net::install(&rel, &programs)?;
+    net::replace_all(&fetched)
+        .map_err(|e| Error::Io(format!("{e}; install {new} from {} instead", rel.html_url)))?;
     println!("installed hamzip {new}");
     Ok(())
 }

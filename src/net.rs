@@ -104,10 +104,30 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Downloads every program's build from `rel` and checks each against
-/// `SHA256SUMS.txt` before anything is replaced, then swaps them in one by one.
-/// Returns the paths that were replaced.
-pub fn install(rel: &Release, programs: &[(PathBuf, &str)]) -> Result<Vec<PathBuf>, Error> {
+/// The programs an upgrade of `exe` replaces: the others installed beside it,
+/// then `exe` itself under its program name `own`, whatever its file is called
+/// (a portable download keeps its release name). The running one goes last.
+pub fn programs_beside(exe: &Path, own: &'static str) -> Vec<(PathBuf, &'static str)> {
+    let mut programs: Vec<_> = exe
+        .parent()
+        .map(installed_programs)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(path, name)| *name != own && path != exe)
+        .collect();
+    programs.push((exe.to_path_buf(), own));
+    programs
+}
+
+/// A program's new build, downloaded and checked, ready for `replace_all`.
+pub struct Fetched {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+/// Downloads each program's build from `rel` and checks it against
+/// `SHA256SUMS.txt`. Nothing on disk changes.
+pub fn fetch(rel: &Release, programs: &[(PathBuf, &str)]) -> Result<Vec<Fetched>, Error> {
     let ver = version_of(&rel.tag_name).ok_or_else(|| {
         Error::Io(format!(
             "latest release has a non-semver tag {}",
@@ -151,66 +171,111 @@ pub fn install(rel: &Release, programs: &[(PathBuf, &str)]) -> Result<Vec<PathBu
                 "{name} does not match its SHA-256; not installing"
             )));
         }
-        fetched.push((path, bytes));
+        fetched.push(Fetched {
+            path: path.clone(),
+            bytes: bytes.to_vec(),
+        });
     }
-    let mut done = Vec::new();
-    for (path, bytes) in fetched {
-        replace_exe(path, &bytes, &["--version"]).map_err(|e| {
-            Error::Io(format!(
-                "could not replace {}: {e}. Install {ver} from {} instead",
-                path.display(),
-                rel.html_url
-            ))
-        })?;
-        done.push(path.clone());
+    Ok(fetched)
+}
+
+/// Replaces every program with its fetched build, or none of them. Each new
+/// build is written beside its program and started once with `--version` (a
+/// build for a newer glibc fails here) before any program is moved aside; the
+/// running one, which Windows can rename but not overwrite, keeps working.
+pub fn replace_all(fetched: &[Fetched]) -> Result<(), Error> {
+    replace_with_probe(fetched, &["--version"])
+}
+
+fn replace_with_probe(fetched: &[Fetched], probe: &[&str]) -> Result<(), Error> {
+    let staged: Vec<PathBuf> = fetched
+        .iter()
+        .map(|f| f.path.with_extension("new"))
+        .collect();
+    let unstage = || {
+        for s in &staged {
+            let _ = std::fs::remove_file(s);
+        }
+    };
+    for (f, s) in fetched.iter().zip(&staged) {
+        if let Err(e) = stage(s, &f.bytes, probe) {
+            unstage();
+            return Err(Error::Io(format!(
+                "could not replace {}: {e}. Nothing was changed",
+                f.path.display()
+            )));
+        }
     }
-    Ok(done)
+    let mut swapped: Vec<&Path> = Vec::new();
+    for (f, s) in fetched.iter().zip(&staged) {
+        let old = old_path(&f.path);
+        let _ = std::fs::remove_file(&old);
+        let moved = std::fs::rename(&f.path, &old).and_then(|_| {
+            std::fs::rename(s, &f.path).inspect_err(|_| {
+                let _ = std::fs::rename(&old, &f.path);
+            })
+        });
+        if let Err(e) = moved {
+            let mut back = Vec::new();
+            for p in swapped.iter().rev() {
+                let restored =
+                    std::fs::remove_file(p).and_then(|_| std::fs::rename(old_path(p), p));
+                if restored.is_err() {
+                    back.push(p.display().to_string());
+                }
+            }
+            unstage();
+            let changed = if back.is_empty() {
+                "Nothing was changed".to_string()
+            } else {
+                format!("Putting back the old {} failed too", back.join(" and "))
+            };
+            return Err(Error::Io(format!(
+                "could not replace {}: {e}. {changed}",
+                f.path.display()
+            )));
+        }
+        swapped.push(&f.path);
+    }
+    Ok(())
+}
+
+/// Writes a new build to `path` and checks that it starts.
+fn stage(path: &Path, bytes: &[u8], probe: &[&str]) -> std::io::Result<()> {
+    File::create(path).and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let mut probe_cmd = std::process::Command::new(path);
+    probe_cmd.args(probe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // the window starts this probe; don't flash a console from it
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        probe_cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    if probe_cmd.output().is_ok_and(|o| o.status.success()) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "the downloaded program does not start on this machine",
+        ))
+    }
 }
 
 pub fn old_path(exe: &Path) -> PathBuf {
     exe.with_extension("old")
 }
 
-/// Writes the new program beside the old one and starts it once with `probe`
-/// (a build for a newer glibc fails here, not after the swap). Only then is the
-/// running exe, which Windows can rename but not overwrite, moved aside.
-fn replace_exe(exe: &Path, bytes: &[u8], probe: &[&str]) -> std::io::Result<()> {
-    let staged = exe.with_extension("new");
-    let fail = |e: std::io::Error| {
-        let _ = std::fs::remove_file(&staged);
-        e
-    };
-    File::create(&staged)
-        .and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()))
-        .map_err(fail)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(fail)?;
-    }
-    let runs = std::process::Command::new(&staged)
-        .args(probe)
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !runs {
-        return Err(fail(std::io::Error::other(
-            "the downloaded program does not start on this machine",
-        )));
-    }
-    let old = old_path(exe);
-    let _ = std::fs::remove_file(&old);
-    std::fs::rename(exe, &old).map_err(fail)?;
-    if let Err(e) = std::fs::rename(&staged, exe) {
-        let _ = std::fs::rename(&old, exe);
-        return Err(fail(e));
-    }
-    Ok(())
-}
-
-/// Deletes the copy an upgrade left behind, once the new program is running.
+/// Deletes the copies an upgrade left behind, once the new programs are running.
 pub fn clean_old_exe() {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::remove_file(old_path(&exe));
+        for (path, _) in programs_beside(&exe, "hamzip") {
+            let _ = std::fs::remove_file(old_path(&path));
+        }
     }
 }
 
@@ -322,16 +387,34 @@ mod tests {
         url
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
+    /// An empty folder that is deleted when the test ends.
+    struct TempDir(PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(name: &str) -> TempDir {
         let d = std::env::temp_dir().join(format!("hamzip-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        d
+        std::fs::create_dir_all(&d).unwrap();
+        TempDir(d)
     }
 
     #[test]
     fn download_keeps_a_file_whose_hash_matches_and_reports_progress() {
         let body: &[u8] = b"model bytes";
-        let dest = temp_dir("ok").join("m.hzm");
+        let dir = temp_dir("ok");
+        let dest = dir.join("m.hzm");
         let mut last = (0, None);
         let got = download_checked(
             &serve_once(body),
@@ -384,7 +467,6 @@ mod tests {
     #[test]
     fn installed_programs_finds_what_is_there() {
         let dir = temp_dir("progs");
-        std::fs::create_dir_all(&dir).unwrap();
         assert!(installed_programs(&dir).is_empty());
         let gui = dir.join(format!("hamzip-gui{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&gui, b"x").unwrap();
@@ -392,28 +474,155 @@ mod tests {
     }
 
     #[test]
-    fn replace_exe_swaps_in_a_program_that_runs() {
-        let dir = temp_dir("swap");
-        std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("hamzip.exe");
-        std::fs::write(&exe, b"old").unwrap();
-        // this test binary is a real program; `--list` makes it exit 0
-        let new = std::fs::read(std::env::current_exe().unwrap()).unwrap();
-        replace_exe(&exe, &new, &["--list"]).unwrap();
-        assert_eq!(std::fs::read(&exe).unwrap(), new);
-        assert_eq!(std::fs::read(old_path(&exe)).unwrap(), b"old");
-        assert!(!exe.with_extension("new").exists());
+    fn a_renamed_portable_download_is_upgraded_last_under_its_own_name() {
+        let dir = temp_dir("beside");
+        let exe = |n: &str| dir.join(format!("{n}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(exe("hamzip"), b"x").unwrap();
+        let portable = exe("hamzip-gui-v0.2.0-x64-portable");
+        std::fs::write(&portable, b"x").unwrap();
+        assert_eq!(
+            programs_beside(&portable, "hamzip-gui"),
+            vec![(exe("hamzip"), "hamzip"), (portable, "hamzip-gui")]
+        );
+        // a second copy of the running program's own kind is left alone
+        std::fs::write(exe("hamzip-gui"), b"x").unwrap();
+        assert_eq!(
+            programs_beside(&exe("hamzip"), "hamzip"),
+            vec![(exe("hamzip-gui"), "hamzip-gui"), (exe("hamzip"), "hamzip")]
+        );
+    }
+
+    // serves each path in `files` once, standing in for a GitHub release
+    fn serve_release(files: Vec<(String, Vec<u8>)>) -> Release {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let assets = files
+            .iter()
+            .map(|(name, _)| Asset {
+                name: name.clone(),
+                browser_download_url: format!("{base}/{name}"),
+            })
+            .collect();
+        std::thread::spawn(move || {
+            for _ in 0..files.len() {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                let path = line.split(' ').nth(1).unwrap_or("").trim_start_matches('/');
+                let body = files
+                    .iter()
+                    .find(|(n, _)| n == path)
+                    .map(|(_, b)| b.clone())
+                    .unwrap();
+                let mut rest = String::new();
+                while r.read_line(&mut rest).unwrap() > 2 {
+                    rest.clear();
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                s.write_all(head.as_bytes()).unwrap();
+                s.write_all(&body).unwrap();
+            }
+        });
+        Release {
+            tag_name: "v9.9.9".into(),
+            html_url: format!("{base}/release"),
+            assets,
+        }
     }
 
     #[test]
-    fn replace_exe_keeps_the_old_one_when_the_new_does_not_start() {
+    fn fetch_checks_every_build_against_the_sums() {
+        let ver = Version::new(9, 9, 9);
+        let (cli, gui) = (
+            asset_name("hamzip", &ver).unwrap(),
+            asset_name("hamzip-gui", &ver).unwrap(),
+        );
+        let programs = [
+            (PathBuf::from("hamzip"), "hamzip"),
+            (PathBuf::from("hamzip-gui"), "hamzip-gui"),
+        ];
+        let sums = |gui_bytes: &[u8]| {
+            format!(
+                "{}  {cli}\n{}  {gui}\n",
+                hex(&Sha256::digest(b"cli")),
+                hex(&Sha256::digest(gui_bytes))
+            )
+            .into_bytes()
+        };
+        let release = |sums: Vec<u8>| {
+            serve_release(vec![
+                ("SHA256SUMS.txt".into(), sums),
+                (cli.clone(), b"cli".to_vec()),
+                (gui.clone(), b"gui".to_vec()),
+            ])
+        };
+        let got = fetch(&release(sums(b"gui")), &programs).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[1].path.as_path(), got[1].bytes.as_slice()),
+            (Path::new("hamzip-gui"), &b"gui"[..])
+        );
+        let err = fetch(&release(sums(b"tampered")), &programs)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains(&gui) && err.contains("SHA-256"), "{err}");
+    }
+
+    // this test binary is a real program; `--list` makes it exit 0
+    fn runnable() -> Vec<u8> {
+        std::fs::read(std::env::current_exe().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn replace_all_swaps_in_every_program() {
+        let dir = temp_dir("swap");
+        let (cli, gui) = (dir.join("hamzip.exe"), dir.join("hamzip-gui.exe"));
+        std::fs::write(&cli, b"old cli").unwrap();
+        std::fs::write(&gui, b"old gui").unwrap();
+        let new = runnable();
+        let fetched = [&cli, &gui].map(|p| Fetched {
+            path: p.clone(),
+            bytes: new.clone(),
+        });
+        replace_with_probe(&fetched, &["--list"]).unwrap();
+        for (p, old) in [(&cli, &b"old cli"[..]), (&gui, b"old gui")] {
+            assert_eq!(std::fs::read(p).unwrap(), new);
+            assert_eq!(std::fs::read(old_path(p)).unwrap(), old);
+            assert!(!p.with_extension("new").exists());
+        }
+    }
+
+    #[test]
+    fn replace_all_changes_nothing_when_one_build_does_not_start() {
         let dir = temp_dir("junk");
-        std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("hamzip.exe");
-        std::fs::write(&exe, b"old").unwrap();
-        let err = replace_exe(&exe, b"not a program", &["--version"]).unwrap_err();
-        assert!(err.to_string().contains("does not start"), "{err}");
-        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
-        assert!(!exe.with_extension("new").exists() && !old_path(&exe).exists());
+        let (cli, gui) = (dir.join("hamzip.exe"), dir.join("hamzip-gui.exe"));
+        std::fs::write(&cli, b"old cli").unwrap();
+        std::fs::write(&gui, b"old gui").unwrap();
+        let fetched = [
+            Fetched {
+                path: cli.clone(),
+                bytes: runnable(),
+            },
+            Fetched {
+                path: gui.clone(),
+                bytes: b"not a program".to_vec(),
+            },
+        ];
+        let err = replace_with_probe(&fetched, &["--list"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not start") && err.contains("Nothing was changed"),
+            "{err}"
+        );
+        for (p, old) in [(&cli, &b"old cli"[..]), (&gui, b"old gui")] {
+            assert_eq!(std::fs::read(p).unwrap(), old);
+            assert!(!p.with_extension("new").exists() && !old_path(p).exists());
+        }
     }
 }

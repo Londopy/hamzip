@@ -60,6 +60,11 @@ fn raw_messages_decode_and_describe_without_a_model() {
 fn a_truncated_message_is_refused_by_info() {
     let (ok, _, err) = hamzip(&["info"], &[0x10, 0xAB]);
     assert!(!ok && err.contains("too short"), "{err}");
+    // model mode has 7 bytes of framing: header, model id and CRC-32
+    let (ok, _, err) = hamzip(&["info"], &[0x10, 0xAB, 0xCD, 1, 2, 3]);
+    assert!(!ok && err.contains("too short"), "{err}");
+    let (ok, out, _) = hamzip(&["info"], &[0x10, 0xAB, 0xCD, 1, 2, 3, 4]);
+    assert!(ok && out.contains("model mode, 7 bytes"), "{out}");
 }
 
 #[test]
